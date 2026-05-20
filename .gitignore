@@ -1,6 +1,3 @@
-# Dependencies (vendored)
-vendor/
-
 # Build artifacts
 target/
 *.lock
@@ -12,6 +9,3 @@ target/
 
 # OS
 .DS_Store
-
-# Wiki (separate repo)
-.wiki/
