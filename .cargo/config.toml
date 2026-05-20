@@ -1,0 +1,22 @@
+# Workaround: Frando/moq branch deps/iroh-098 references
+# https://github.com/moq-dev/web-transport branch deps/iroh-098, which no
+# longer exists on the remote. Commit d5cd0558... is still reachable as a SHA.
+# We source-replace the branch ref with the pinned SHA so cargo's resolver
+# bypasses the missing-branch fetch.
+#
+# [patch] does NOT work here because cargo eagerly resolves the original git
+# ref before applying patches and fails on the missing branch. Source
+# replacement is applied at the resolver level and skips the eager fetch.
+#
+# Remove this when Frando/moq rebases deps/iroh-098 onto a live web-transport
+# branch, or when the project upgrades to iroh 1.0 (which uses the live
+# deps/iroh-1.0-rc.0 branch).
+
+[source.broken-web-transport]
+git = "https://github.com/moq-dev/web-transport"
+branch = "deps/iroh-098"
+replace-with = "vendored-web-transport"
+
+[source.vendored-web-transport]
+git = "https://github.com/moq-dev/web-transport"
+rev = "d5cd0558992e314cb57974d00875c2aa10b45910"

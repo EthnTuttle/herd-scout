@@ -1,0 +1,6 @@
+[submodule "vendor/iroh-live"]
+	path = vendor/iroh-live
+	url = https://github.com/n0-computer/iroh-live
+[submodule "vendor/web-transport"]
+	path = vendor/web-transport
+	url = https://github.com/moq-dev/web-transport

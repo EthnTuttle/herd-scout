@@ -1,6 +1,9 @@
 # Build artifacts
 target/
+# Cargo.lock IS tracked for application workspaces — leave it out of ignore.
+# Other *.lock files (tool-specific) stay ignored.
 *.lock
+!Cargo.lock
 
 # IDE
 .idea/
