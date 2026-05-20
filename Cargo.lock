@@ -3722,6 +3722,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "herd-scout-jni"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "iroh-live",
+ "jni 0.21.1",
+ "moq-media",
+ "moq-media-android",
+ "ndk",
+ "ndk-context",
+ "rusty-codecs",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5366,6 +5384,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-media-android"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glow",
+ "khronos-egl",
+ "libc",
+ "moq-media",
+ "tracing",
+]
+
+[[package]]
 name = "moq-media-egui"
 version = "0.1.0"
 dependencies = [
@@ -6868,6 +6898,7 @@ dependencies = [
  "iroh-live",
  "moq-media-egui",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 

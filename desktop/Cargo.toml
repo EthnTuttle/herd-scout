@@ -9,4 +9,8 @@ moq-media-egui = { path = "../vendor/iroh-live/moq-media-egui" }
 egui = "0.33"
 eframe = "0.33"
 tokio = { version = "1", features = ["full"] }
-tracing-subscriber = "0.3"
+# `tracing` is a transitive dep of iroh-live; declared here so we can emit
+# our own tracing events (info/warn/debug) from the streaming task and UI.
+tracing = "0.1"
+# `env-filter` is needed so `RUST_LOG` controls verbosity at runtime.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

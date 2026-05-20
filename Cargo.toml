@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "desktop",
+    "android-jni",
     # iroh-live
     "vendor/iroh-live/iroh-live",
     "vendor/iroh-live/iroh-live-relay",
@@ -27,7 +28,7 @@ moq-lite = { git = "https://github.com/Frando/moq", branch = "deps/iroh-098" }
 moq-mux = { git = "https://github.com/Frando/moq", branch = "deps/iroh-098" }
 moq-relay = { git = "https://github.com/Frando/moq", branch = "deps/iroh-098", default-features = false }
 moq-native = { git = "https://github.com/Frando/moq", branch = "deps/iroh-098", default-features = false }
-web-transport-iroh = { git = "https://github.com/moq-dev/web-transport", branch = "deps/iroh-1.0-rc.0" }
+web-transport-iroh = { git = "https://github.com/moq-dev/web-transport", branch = "deps/iroh-098" }
 
 # iroh-live internal
 iroh-live = { path = "vendor/iroh-live/iroh-live", default-features = false }

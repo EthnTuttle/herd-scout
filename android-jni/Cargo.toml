@@ -1,0 +1,39 @@
+[package]
+name = "herd-scout-jni"
+version = "0.1.0"
+edition = "2024"
+description = "JNI bridge for the herd-scout Android camera publisher"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# Android target produces a cdylib (.so) that gets loaded via System.loadLibrary.
+# Host targets fall back to rlib so `cargo check` / `cargo build` work without
+# the Android NDK installed.
+crate-type = ["cdylib", "rlib"]
+
+# ── Android-only deps ──────────────────────────────────────────────────────
+# Everything that pulls in the Frando/moq stack and Android NDK bindings is
+# behind `cfg(target_os = "android")` so host `cargo check` stays cheap and
+# does not require the NDK to be available.
+[target.'cfg(target_os = "android")'.dependencies]
+iroh-live = { workspace = true }
+moq-media = { workspace = true, features = ["h264", "android"] }
+moq-media-android = { workspace = true }
+rusty-codecs = { workspace = true, features = ["h264", "hang", "android"] }
+jni = "0.21"
+ndk = { version = "0.9", features = ["api-level-26"] }
+ndk-context = "0.1"
+tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+bytes = "1"
+
+# Always-on host-side deps so the crate compiles for `cargo check` on macOS/Linux
+# desktop without an NDK. The actual JNI surface lives behind cfg gates.
+[dependencies]
+tracing = "0.1"
+
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple monochrome camera icon. Replace with branded artwork pre-launch. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,38 m-22,0 a22,22 0 1,0 44,0 a22,22 0 1,0 -44,0 z M54,46 m-12,0 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0 z M40,28 l-6,4 l-6,0 l-2,4 l0,16 l8,0 l0,-4 l8,0 l0,-20 z" />
+</vector>
