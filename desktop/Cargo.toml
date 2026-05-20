@@ -1,0 +1,12 @@
+[package]
+name = "p2p-video-pipe-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iroh-live = { path = "../vendor/iroh-live/iroh-live" }
+moq-media-egui = { path = "../vendor/iroh-live/moq-media-egui" }
+egui = "0.33"
+eframe = "0.33"
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = "0.3"

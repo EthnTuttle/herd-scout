@@ -1,0 +1,17 @@
+# Dependencies (vendored)
+vendor/
+
+# Build artifacts
+target/
+*.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Wiki (separate repo)
+.wiki/
