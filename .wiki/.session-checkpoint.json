@@ -1,0 +1,13 @@
+{
+  "session_id": "2026-05-20-132147",
+  "topic": "OSS farm management mobile-to-desktop + drone integrations",
+  "last_event": "research_completed",
+  "last_updated": "2026-05-20T13:50:22Z",
+  "rounds_completed": 2,
+  "cumulative_sources": 17,
+  "cumulative_articles": 14,
+  "progress_scores": [96, 53],
+  "duration_min": 28,
+  "playbook": "output/playbook-herd-scout-2026-05-20.md",
+  "status": "completed"
+}

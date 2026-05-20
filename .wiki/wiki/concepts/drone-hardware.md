@@ -70,3 +70,11 @@ Using a mounted smartphone avoids purchasing separate camera hardware.
 - **QGroundControl** - Ground control
 - **YOLOv5/YOLOv7** - Object detection
 - **OpenDataCam** - Counting application
+
+## See also
+
+- [[android-on-drone]] — phone as companion / ML / 4G bridge
+- [[drone-vision-software]]
+- [[oss-drone-fms-pipeline]]
+- [[implementation-plan]]
+- [[herd-scout-positioning]]

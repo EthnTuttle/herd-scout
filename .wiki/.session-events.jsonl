@@ -1,0 +1,6 @@
+{"event":"research_started","session_id":"2026-05-20-132147","topic":"OSS farm management mobile-to-desktop + drone integrations","mode":"single","min_time":"1h","start_time":"2026-05-20T13:21:47Z"}
+{"event":"round_completed","round":1,"sources_ingested":14,"articles_compiled":12,"progress_score":96,"timestamp":"2026-05-20T13:39:57Z"}
+{"event":"reflection","round":1,"top_gaps":["eid-reader-protocols","iroh-docs-fms-schema","webodm-fms-bridge"],"timestamp":"2026-05-20T13:39:57Z"}
+{"event":"round_completed","round":2,"sources_ingested":3,"articles_compiled":2,"progress_score":53,"timestamp":"2026-05-20T13:50:22Z"}
+{"event":"playbook_written","path":".wiki/output/playbook-herd-scout-2026-05-20.md","timestamp":"2026-05-20T13:50:22Z"}
+{"event":"research_completed","session_id":"2026-05-20-132147","cumulative_sources":17,"cumulative_articles":14,"rounds":2,"duration_min":28,"timestamp":"2026-05-20T13:50:22Z"}

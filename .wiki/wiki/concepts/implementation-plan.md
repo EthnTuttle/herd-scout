@@ -109,3 +109,12 @@ cattle_count = len([d for d in detections if d.class in [cow, horse, sheep]])
 | **Total** | **$530** |
 
 (Phone is "free" - use what you have)
+
+## See also
+
+- [[herd-scout-positioning]] — broader strategic context for what this plan supports
+- [[android-on-drone]] — verdict on phone roles and MAVLink library choices
+- [[drone-hardware]]
+- [[drone-vision-software]]
+- [[oss-drone-fms-pipeline]]
+- [[mobile-desktop-architecture]]

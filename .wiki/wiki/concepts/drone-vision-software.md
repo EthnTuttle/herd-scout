@@ -139,3 +139,13 @@ Create an open source vision software tool that can:
 3. **Target Jetson Xavier NX** for edge deployment
 4. **Collect custom dataset** for cattle/fence specific detection
 5. **Use RTSP** for live drone feed input
+
+## See also
+
+- [[oss-drone-fms-pipeline]] — where this fits in the broader pipeline (L6 real-time inference layer)
+- [[precision-ag-drone-use-cases]] — adjacent use cases worth roadmap consideration
+- [[herdnet-livestock-cv]] — alternative aerial livestock detection model
+- [[android-on-drone]] — running this on a phone instead of Jetson
+- [[drone-hardware]]
+- [[implementation-plan]]
+- [[herd-scout-positioning]]
