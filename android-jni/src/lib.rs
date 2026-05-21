@@ -348,9 +348,14 @@ pub extern "system" fn Java_com_herdscout_app_HerdScoutJni_nativePushCameraNv12(
         Err(_) => return,
     };
 
-    let Some(ref state) = guard.streaming else {
-        // Streaming hasn't started yet — drop the frame.
-        return;
+    // Clone the Arc out of the immutable borrow first so we can then
+    // mutate the frame counter without overlapping borrows.
+    let camera_source = match guard.streaming.as_ref() {
+        Some(state) => Arc::clone(&state.camera_source),
+        None => {
+            // Streaming hasn't started yet — drop the frame.
+            return;
+        }
     };
 
     let frame_idx = guard.frames_pushed;
@@ -379,7 +384,6 @@ pub extern "system" fn Java_com_herdscout_app_HerdScoutJni_nativePushCameraNv12(
         Duration::ZERO,
     );
 
-    let camera_source = Arc::clone(&state.camera_source);
     drop(guard); // release session lock before touching the source mutex
 
     if let Ok(mut src) = camera_source.lock() {

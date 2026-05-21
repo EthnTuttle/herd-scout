@@ -1,4 +1,5 @@
 import org.gradle.internal.os.OperatingSystem
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -101,8 +102,20 @@ val rustWorkspaceDir = file("../..").canonicalFile
 val jniLibsDir = file("src/main/jniLibs")
 
 fun detectNdkHome(): File? {
+    // Resolution order:
+    //   1. ANDROID_NDK_HOME (explicit override)
+    //   2. ANDROID_HOME / ANDROID_SDK_ROOT env var → <root>/ndk/<version>
+    //   3. sdk.dir from rootProject's local.properties → <root>/ndk/<version>
+    System.getenv("ANDROID_NDK_HOME")?.let { File(it).takeIf(File::isDirectory) }?.let { return it }
     val androidHome = System.getenv("ANDROID_HOME")
         ?: System.getenv("ANDROID_SDK_ROOT")
+        ?: run {
+            val localProps = File(rootProject.projectDir, "local.properties")
+            if (localProps.isFile) {
+                Properties().apply { localProps.inputStream().use { load(it) } }
+                    .getProperty("sdk.dir")
+            } else null
+        }
         ?: return null
     val ndkDir = File(androidHome, "ndk")
     if (!ndkDir.isDirectory) return null
