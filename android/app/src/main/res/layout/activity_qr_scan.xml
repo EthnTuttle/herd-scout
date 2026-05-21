@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000">
@@ -10,15 +11,38 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Hint banner. Optional; keeps the screen helpful. -->
+    <!-- Viewfinder reticle: a centered square frame that tells the user
+         where the QR will be detected. Implemented in
+         [QrViewfinderOverlay.kt] as a custom View that draws four
+         corner brackets around the focus rect over a translucent dim
+         background. Wave 5A polish. -->
+    <com.herdscout.app.QrViewfinderOverlay
+        android:id="@+id/qrViewfinder"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Top hint banner. Switches text in [QrScanActivity.kt] to show
+         a low-light tip after a few seconds without a successful
+         decode. -->
     <TextView
         android:id="@+id/qrHint"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
+        android:layout_gravity="top"
         android:padding="16dp"
         android:background="#88000000"
         android:textColor="#FFFFFF"
         android:gravity="center"
         android:text="@string/qr_hint" />
+
+    <!-- Torch (flashlight) toggle: small button bottom-right. The
+         activity hides this when the device has no rear-camera flash. -->
+    <Button
+        android:id="@+id/qrTorchButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:text="@string/qr_torch_on"
+        android:visibility="gone" />
 </FrameLayout>

@@ -10,4 +10,7 @@
     <string name="status_streaming">Streaming</string>
     <string name="status_disconnected">Disconnected</string>
     <string name="qr_hint">Point at the desktop\'s QR code</string>
+    <string name="qr_hint_low_light">Low light? Tap the torch button to help the scanner.</string>
+    <string name="qr_torch_on">Torch ON</string>
+    <string name="qr_torch_off">Torch OFF</string>
 </resources>

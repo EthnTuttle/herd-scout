@@ -40,3 +40,49 @@ anyhow = "1"
 # read lock per frame and parking_lot's RwLock has no poisoning surface to
 # `.unwrap()` away on each access.
 parking_lot = "0.12"
+
+# === Wave 5B: persistence (last-paired-ticket store) ===
+# `iroh-smol-kv` is the workspace's KV CRDT (n0-computer/iroh-smol-kv branch
+# `iroh-098`). The `[[iroh-docs-fms-schema]]` design treats this as the
+# durable prefs/settings store. **Important**: the live `iroh-098` branch
+# currently exposes only a gossip-coupled in-memory `Client` (no persistent
+# backend) with a 24h default TTL; instantiating it requires a full iroh
+# `Endpoint` + `iroh-gossip` + `Router`. For MVP local-only prefs that must
+# survive restart, the store layer below uses a tiny on-disk JSON sidecar
+# whose schema mirrors the smol-kv `(scope, key, value, timestamp)` shape so
+# migration is mechanical once iroh-smol-kv gains a persistent backend (or a
+# durable-prefs fork is selected). The dep is declared eagerly so this module
+# can pivot to the real CRDT without a Cargo.toml change. See `src/store/`.
+iroh-smol-kv = { workspace = true }
+# `directories` derives the cross-platform user-data directory
+# (`~/Library/Application Support/net.herd-scout.herd-scout/` on macOS,
+# `~/.local/share/herd-scout/` on Linux, `%APPDATA%\herd-scout\herd-scout\`
+# on Windows). v5 is current.
+directories = "5"
+# `serde` + `serde_json` serialise the prefs sidecar. Both already pulled
+# transitively via iroh-live; declared explicitly so the store module can
+# `#[derive(Serialize, Deserialize)]` without depending on a transitive
+# version pin.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `rand` generates the device-author key on first launch. Already transitive
+# via iroh; declared so we can call `rand::rng().fill_bytes(...)` directly.
+rand = "0.9"
+
+# === Wave 5A: QR pairing ===
+# `qrcode` renders ticket strings into a black/white module grid which we
+# upload as an egui texture so the phone can scan it. Already pinned at
+# 0.14.1 in Cargo.lock as a transitive dep, so this declaration just makes
+# it a direct dep without bumping the resolved version. `default-features =
+# false` drops the `image` and `svg` rendering helpers — we walk the
+# `QrCode::to_colors()` matrix directly into an `egui::ColorImage` so we
+# don't need the rendering layer.
+qrcode = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+# Wave 5B: scoped to tests for the `store` module — a tempdir lets the
+# test re-open the same store after a "restart" without touching the real
+# user-data directory. `iroh` is brought in for `SecretKey` / `EndpointAddr`
+# fixtures so we can synthesise a `LiveTicket` without a live endpoint.
+tempfile = "3"
+iroh = { workspace = true }
