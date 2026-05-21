@@ -11,6 +11,7 @@
 //! cargo run -p p2p-video-pipe-desktop -- --ticket "iroh-live:..."
 //! ```
 
+mod cv;
 mod stream;
 mod ui;
 
@@ -55,7 +56,12 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| {
             let stream = stream::spawn(ticket, cc.egui_ctx.clone());
-            Ok(Box::new(ui::App::new(cc, stream, has_ticket)))
+            // Wave 3: spin up the CV inference task on the same
+            // tokio runtime. The shared `DetectionSnapshot` is read
+            // from the egui paint loop and written from the CV task.
+            let snapshot = cv::state::new_shared_snapshot();
+            cv::spawn_cv_task(stream.frame_rx(), snapshot.clone(), cc.egui_ctx.clone());
+            Ok(Box::new(ui::App::new(cc, stream, snapshot, has_ticket)))
         }),
     )
 }
