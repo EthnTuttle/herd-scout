@@ -3,7 +3,6 @@ package com.herdscout.app
 import android.content.Context
 import android.graphics.ImageFormat
 import android.util.Log
-import android.view.Surface
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -125,17 +124,18 @@ object StreamingController {
             )
             .build()
 
-        // Issue 4: lock the encoded frame orientation to landscape
-        // regardless of how the user holds the phone. Most phone
-        // cameras' sensors are physically landscape, so ROTATION_90 is
-        // the "no extra rotation" path on the rear camera. The user
-        // wants the desktop preview to always be landscape (the phone
-        // is typically mounted on a drone or tripod), so we tell
-        // CameraX: "encode as if the device were oriented in
-        // landscape." CameraX then handles whatever the device's
-        // current display rotation is transparently — portrait users
-        // still get landscape video on the wire.
-        val targetRotation = Surface.ROTATION_90
+        // Wave 9: read the user's configured "top edge" from
+        // SharedPreferences and translate it to a CameraX target
+        // rotation. Wave 7 hardcoded ROTATION_90 (right edge = top of
+        // video) which works for most phones in their natural mount,
+        // but users mount the phone every which way on tripods/drones,
+        // so they need to override which edge becomes the top. The
+        // default is still RIGHT so existing users see Wave 7's
+        // behaviour unchanged.
+        val prefs = context.getSharedPreferences(TopEdge.PREFS_NAME, Context.MODE_PRIVATE)
+        val topEdge = TopEdge.fromPrefs(prefs)
+        val targetRotation = topEdge.rotation
+        Log.i(TAG, "startStreaming: topEdge=$topEdge -> targetRotation=$targetRotation")
 
         val preview = Preview.Builder()
             .setResolutionSelector(resolutionSelector)

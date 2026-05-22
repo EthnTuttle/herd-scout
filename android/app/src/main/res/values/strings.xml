@@ -13,5 +13,15 @@
     <string name="qr_hint_low_light">Low light? Tap the torch button to help the scanner.</string>
     <string name="qr_torch_on">Torch ON</string>
     <string name="qr_torch_off">Torch OFF</string>
-    <string name="orientation_hint">↻  Rotate phone to landscape for correct video orientation</string>
+
+    <!-- Wave 9: top-edge indicator + picker dialog -->
+    <string name="top_edge_label_format">TOP: %1$s</string>
+    <string name="top_edge_arrow_desc">Arrow indicating which device edge appears at the top of the video</string>
+    <string name="top_edge_settings_desc">Change which edge of the phone is the top of the video</string>
+    <string name="top_edge_dialog_title">Top of video</string>
+    <string name="top_edge_option_top">Top edge</string>
+    <string name="top_edge_option_right">Right edge</string>
+    <string name="top_edge_option_bottom">Bottom edge</string>
+    <string name="top_edge_option_left">Left edge</string>
+    <string name="top_edge_restart_toast">Restart streaming for the new orientation to apply</string>
 </resources>

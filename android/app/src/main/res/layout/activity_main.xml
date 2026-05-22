@@ -79,24 +79,49 @@
         android:fontFamily="monospace" />
 </LinearLayout>
 
-    <!-- Orientation overlay: nudges the user to hold the phone in landscape
-         so the encoded video matches CameraX's targetRotation = ROTATION_90.
-         Only visible when the device's display rotation is portrait
-         (ROTATION_0 / ROTATION_180); hidden in landscape so it doesn't
-         nag once the user is correctly oriented. Sits on top of the
-         whole screen as a banner across the top. -->
-    <TextView
-        android:id="@+id/orientationHint"
-        android:layout_width="match_parent"
+    <!-- Wave 9: top-edge indicator. Persistent corner widget showing
+         which physical edge of the phone the user has configured to be
+         the "top" of the captured video. The arrow rotates based on the
+         saved TopEdge enum (see TopEdge.kt + MainActivity.updateOrientationIndicator).
+         Tapping the gear icon opens the picker dialog. Replaces Wave 8's
+         "rotate to landscape" banner-nag — the phone no longer needs to
+         be physically rotated; the user just declares which edge is up. -->
+    <LinearLayout
+        android:id="@+id/topEdgeIndicator"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:text="@string/orientation_hint"
-        android:textSize="14sp"
-        android:textStyle="bold"
-        android:textColor="#FFFFFF"
-        android:gravity="center"
-        android:padding="14dp"
-        android:background="#CC1976D2"
-        android:elevation="8dp"
-        android:visibility="gone" />
+        android:layout_gravity="top|end"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="8dp"
+        android:layout_margin="8dp"
+        android:background="#80000000"
+        android:elevation="6dp">
+
+        <ImageView
+            android:id="@+id/topEdgeArrow"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:src="@drawable/ic_arrow_up"
+            android:contentDescription="@string/top_edge_arrow_desc" />
+
+        <TextView
+            android:id="@+id/topEdgeLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:layout_marginEnd="6dp"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:fontFamily="monospace" />
+
+        <ImageButton
+            android:id="@+id/topEdgeSettings"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:src="@android:drawable/ic_menu_preferences"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/top_edge_settings_desc" />
+    </LinearLayout>
 </FrameLayout>
