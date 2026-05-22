@@ -1,0 +1,37 @@
+[package]
+name = "herd-scout-gui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "herd-scout-gui"
+path = "src/main.rs"
+
+[dependencies]
+# === Shared IPC types (no iroh, no moq, no ort here) ===
+herd-scout-ipc = { path = "../herd-scout-ipc" }
+
+# === egui frontend ===
+egui = "0.33"
+eframe = "0.33"
+
+# === QR rendering for the pairing screen ===
+qrcode = { version = "0.14", default-features = false }
+
+# === JPEG decode for incoming preview frames ===
+image = "0.25"
+
+# === Async + serde ===
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+
+# === Tracing ===
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+# === Daemon spawn helper (for getting the user-data dir for socket paths and logs) ===
+directories = "5"
+

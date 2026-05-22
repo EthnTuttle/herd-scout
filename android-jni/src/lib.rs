@@ -111,6 +111,11 @@ struct SessionHandle {
     /// Frame counter for the status overlay.
     frames_pushed: u64,
     created_at: Instant,
+    /// Wave 6: outbound moq session to the desktop daemon, established
+    /// at connect time. Held here so it stays alive for the publishing
+    /// run; the moq actor will fan published broadcasts out over it.
+    #[allow(dead_code, reason = "session is retained for its lifetime; not directly read")]
+    _moq_session: iroh_moq::MoqSession,
 }
 
 struct StreamingState {
@@ -208,12 +213,25 @@ async fn connect_impl(ticket_str: String) -> Result<jlong> {
         .spawn();
     info!(id = %live.endpoint().id().fmt_short(), "endpoint ready");
 
+    // Wave 6: dial the desktop daemon's endpoint up front so the
+    // resulting moq session is registered with the daemon BEFORE the
+    // phone calls `Live::publish`. The actor in
+    // `iroh-moq/src/lib.rs:482-526` then auto-fans the broadcast out
+    // over this session. We retain the session in the SessionHandle
+    // so it stays alive for the full publishing run.
+    let _moq_session = live
+        .transport()
+        .connect(ticket.endpoint.clone())
+        .await
+        .context("session connect to desktop daemon failed")?;
+
     let session = SessionHandle {
         live,
         ticket,
         streaming: None,
         frames_pushed: 0,
         created_at: Instant::now(),
+        _moq_session,
     };
     Ok(to_jlong(Arc::new(Mutex::new(session))))
 }

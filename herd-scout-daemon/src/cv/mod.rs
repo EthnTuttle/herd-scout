@@ -25,8 +25,9 @@ pub mod preprocess;
 pub mod state;
 pub mod task;
 
-// Re-export the public surface used by `main.rs` and `ui.rs`. The
-// other types stay reachable as `cv::model::Detection` etc. for tests
-// and future plumbing.
+// Re-export the public surface used by `main.rs`. The other types
+// stay reachable as `cv::model::Detection` etc. for tests and
+// future plumbing.
+#[allow(unused_imports, reason = "kept for reuse by future headless dump-to-disk path")]
 pub use state::SharedSnapshot;
 pub use task::spawn_cv_task;

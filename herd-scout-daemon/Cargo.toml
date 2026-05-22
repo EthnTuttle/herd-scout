@@ -1,0 +1,43 @@
+[package]
+name = "herd-scout-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "herd-scout-daemon"
+path = "src/main.rs"
+
+[dependencies]
+# === iroh-live + moq (workspace pins) ===
+iroh-live = { workspace = true }
+iroh-moq = { workspace = true }
+moq-media = { workspace = true }
+iroh = { workspace = true }
+iroh-smol-kv = { workspace = true }
+
+# === Wave 6: shared IPC types ===
+herd-scout-ipc = { path = "../herd-scout-ipc" }
+
+# === Async runtime + tracing ===
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+parking_lot = "0.12"
+
+# === CV (Wave 3) ===
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+ndarray = "0.17"
+image = "0.25"
+
+# === Persistence (Wave 5B) ===
+directories = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+

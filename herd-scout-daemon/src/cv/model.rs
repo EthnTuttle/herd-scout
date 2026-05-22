@@ -148,5 +148,5 @@ impl Detector {
 /// log messages even though we bake it in at compile time.
 #[allow(dead_code, reason = "kept for future logging / `--print-model-path` CLI")]
 pub fn model_path_for_logging() -> PathBuf {
-    PathBuf::from("desktop/assets/yolov5n.onnx")
+    PathBuf::from("herd-scout-daemon/assets/yolov5n.onnx")
 }

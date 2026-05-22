@@ -1,46 +1,64 @@
 //! CV inference task — bridges the streaming `watch::Receiver<VideoFrame>`
-//! to the shared `DetectionSnapshot` consumed by egui.
+//! to the shared `DetectionSnapshot` and the daemon's IPC fan-out.
 //!
 //! Pacing rule (from `cv-design.md`): cap inference at 10 FPS via a
 //! `tokio::time::Interval`. If the latest frame is older than the tick,
 //! we skip it and wait for the next tick. ORT's `Session::run` is
 //! synchronous and CPU-heavy, so we punt it to `spawn_blocking`.
+//!
+//! ## Wave 6 changes
+//!
+//! Replaced the egui `Context::request_repaint` side-channel with an
+//! `mpsc::Sender<ServerMsg>` so the daemon (which has no egui) can fan
+//! detections out to GUIs over IPC. The `SharedSnapshot` is still
+//! written so headless ("dump-to-disk") modes can keep observing the
+//! rolling state.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use herd_scout_ipc::{ClassCountsWire, DetWire, ServerMsg};
 use iroh_live::media::format::VideoFrame;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info, warn};
 
-use super::model::Detector;
-use super::state::SharedSnapshot;
+use super::model::{CocoClass, Detector};
+use super::state::{ClassCounts, SharedSnapshot};
 
 /// Frame budget. Locked at 10 FPS by the design doc.
 const TICK: Duration = Duration::from_millis(100);
 
-/// Spawn the long-lived CV inference task. Returns immediately; the
-/// task runs until the runtime shuts down.
+fn class_to_wire(c: CocoClass) -> u8 {
+    match c {
+        CocoClass::Horse => 0,
+        CocoClass::Sheep => 1,
+        CocoClass::Cow => 2,
+    }
+}
+
+fn counts_to_wire(c: ClassCounts) -> ClassCountsWire {
+    ClassCountsWire {
+        horse: c.horse,
+        sheep: c.sheep,
+        cow: c.cow,
+    }
+}
+
+/// Spawn the long-lived CV inference task.
 ///
-/// The task:
-/// * subscribes to the same `watch::Receiver<Option<Arc<VideoFrame>>>`
-///   the UI reads from,
-/// * builds a `Detector` (logs ERROR + sets the snapshot to "disabled"
-///   if construction fails — does **not** panic),
-/// * ticks every 100 ms, runs inference on the latest frame via
-///   `spawn_blocking`,
-/// * writes the result into the shared snapshot for the UI thread.
+/// `ipc_tx`: each successful inference emits a `ServerMsg::Detections`
+/// to this channel; an init failure emits a `ServerMsg::CvBanner` and
+/// the task exits.
 pub fn spawn_cv_task(
     mut frame_rx: watch::Receiver<Option<Arc<VideoFrame>>>,
     snapshot: SharedSnapshot,
-    egui_ctx: egui::Context,
+    ipc_tx: mpsc::Sender<ServerMsg>,
 ) {
     tokio::spawn(async move {
         // Build the detector on the inference task so any init cost
-        // doesn't block the UI thread. If it fails we still keep the
-        // task alive (per design doc: "video keeps playing") but mark
-        // the snapshot as disabled and exit.
+        // doesn't block other tasks. If it fails we still keep the
+        // task alive enough to send a banner, then exit.
         let detector = match tokio::task::spawn_blocking(Detector::new).await {
             Ok(Ok(d)) => d,
             Ok(Err(e)) => {
@@ -48,7 +66,12 @@ pub fn spawn_cv_task(
                 snapshot
                     .write()
                     .disable(format!("CV disabled: {e}"));
-                egui_ctx.request_repaint();
+                let _ = ipc_tx
+                    .send(ServerMsg::CvBanner {
+                        text: Some(format!("CV disabled: {e}")),
+                        disabled: true,
+                    })
+                    .await;
                 return;
             }
             Err(e) => {
@@ -56,7 +79,12 @@ pub fn spawn_cv_task(
                 snapshot
                     .write()
                     .disable(format!("CV disabled: detector init panicked: {e}"));
-                egui_ctx.request_repaint();
+                let _ = ipc_tx
+                    .send(ServerMsg::CvBanner {
+                        text: Some(format!("CV disabled: detector init panicked: {e}")),
+                        disabled: true,
+                    })
+                    .await;
                 return;
             }
         };
@@ -64,33 +92,25 @@ pub fn spawn_cv_task(
 
         // The detector is owned by an `Arc<Mutex>` so each
         // `spawn_blocking` body can take it for the duration of one
-        // inference call. (Single-task means there's never real
-        // contention on this mutex; it's just to satisfy `Send`
-        // bounds on the moved closure.)
+        // inference call.
         let detector = Arc::new(tokio::sync::Mutex::new(detector));
 
         let mut tick = interval(TICK);
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        // Skip the immediate-fire first tick.
         tick.tick().await;
 
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
                 changed = frame_rx.changed() => {
-                    // Channel closed → streaming task is gone; we can
-                    // exit cleanly.
                     if changed.is_err() {
                         info!("CV: frame channel closed; inference task exiting");
                         break;
                     }
-                    // Don't infer on every frame change; coalesce until
-                    // the next tick.
                     continue;
                 }
             }
 
-            // Snapshot the latest frame.
             let Some(frame) = frame_rx.borrow().clone() else {
                 continue;
             };
@@ -106,17 +126,49 @@ pub fn spawn_cv_task(
             match join {
                 Ok(Ok(dets)) => {
                     let now = Instant::now();
+                    let frame_pts_ms = frame.timestamp.as_millis() as u64;
+                    // CV bboxes are in source-frame pixel space; the
+                    // GUI sees the daemon's downscaled JPEG preview,
+                    // so we ship normalised coordinates [0, 1] and
+                    // the GUI multiplies by the rendered video rect.
+                    let src_w = frame.width().max(1) as f32;
+                    let src_h = frame.height().max(1) as f32;
+                    let wire_dets: Vec<DetWire> = dets
+                        .iter()
+                        .map(|d| DetWire {
+                            class: class_to_wire(d.class),
+                            bbox: [
+                                d.bbox[0] / src_w,
+                                d.bbox[1] / src_h,
+                                d.bbox[2] / src_w,
+                                d.bbox[3] / src_h,
+                            ],
+                            score: d.score,
+                        })
+                        .collect();
+
                     snapshot.write().update(dets, frame.timestamp, now);
-                    egui_ctx.request_repaint();
+                    let counts_wire = counts_to_wire(snapshot.read().rolling_counts());
+
+                    let _ = ipc_tx
+                        .send(ServerMsg::Detections {
+                            frame_pts_ms,
+                            dets: wire_dets,
+                            counts: counts_wire,
+                        })
+                        .await;
                 }
                 Ok(Err(e)) => {
                     warn!(error = %e, "CV: single-frame inference failed; skipping");
-                    // If decode_yolov5 raised an unexpected-shape error,
-                    // surface it in the UI — design doc calls this out.
                     let msg = format!("{e:#}");
                     if msg.contains("unexpected output shape") || msg.contains("unexpected row length") {
                         snapshot.write().disable("CV: model output shape unexpected");
-                        egui_ctx.request_repaint();
+                        let _ = ipc_tx
+                            .send(ServerMsg::CvBanner {
+                                text: Some("CV: model output shape unexpected".to_string()),
+                                disabled: true,
+                            })
+                            .await;
                         error!("CV: disabling due to persistent shape mismatch");
                         return;
                     }

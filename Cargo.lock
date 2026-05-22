@@ -3743,12 +3743,65 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "herd-scout-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "herd-scout-ipc",
+ "image",
+ "iroh",
+ "iroh-live",
+ "iroh-moq",
+ "iroh-smol-kv",
+ "moq-media",
+ "ndarray",
+ "ort",
+ "parking_lot",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "herd-scout-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "eframe",
+ "egui",
+ "herd-scout-ipc",
+ "image",
+ "parking_lot",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "herd-scout-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "herd-scout-jni"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
  "iroh-live",
+ "iroh-moq",
  "jni 0.21.1",
  "moq-media",
  "moq-media-android",
@@ -7023,32 +7076,6 @@ dependencies = [
  "elliptic-curve",
  "primeorder",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "p2p-video-pipe-desktop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "directories",
- "eframe",
- "egui",
- "image",
- "iroh",
- "iroh-live",
- "iroh-smol-kv",
- "moq-media-egui",
- "ndarray",
- "ort",
- "parking_lot",
- "qrcode",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,6 +1,8 @@
 [workspace]
 members = [
-    "desktop",
+    "herd-scout-daemon",
+    "herd-scout-gui",
+    "herd-scout-ipc",
     "android-jni",
     # iroh-live
     "vendor/iroh-live/iroh-live",
