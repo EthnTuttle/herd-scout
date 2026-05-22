@@ -23,6 +23,14 @@ use crate::pairing;
 
 const RECONNECT_STALE_AFTER: Duration = Duration::from_secs(2);
 
+/// Small ASCII-art glyph rendered in the bottom HUD. Two-eyed cow head;
+/// monospace, four lines tall. Kept short so the HUD stays compact even
+/// on a 720p viewport.
+const HUD_ASCII: &str = r#"   /^^^\
+  ( o.o )
+   > v <
+   ^^ ^^"#;
+
 pub struct App {
     state: Arc<SharedClientState>,
     handle: IpcClientHandle,
@@ -39,6 +47,17 @@ pub struct App {
     /// Last seen frame pts to detect "first frame yet?".
     seen_first_frame: bool,
     egui_ctx: egui::Context,
+    /// Total frames rendered into `frame_view` since startup. Bumped
+    /// from `drain_frame` whenever a *new* frame is ingested.
+    frame_count: u64,
+    /// Total bytes of JPEG payload received since startup. Bumped from
+    /// `drain_frame` so we don't have to mutate `SharedClientState`.
+    bytes_rx: u64,
+    /// `pts_ms` of the last frame we counted, so we don't double-count
+    /// on repaints when no new frame has arrived.
+    last_counted_pts_ms: Option<u64>,
+    /// Wall-clock start of the GUI process, for the HUD uptime counter.
+    start_instant: Instant,
 }
 
 impl App {
@@ -54,6 +73,10 @@ impl App {
             last_det_at: None,
             seen_first_frame: false,
             egui_ctx: cc.egui_ctx.clone(),
+            frame_count: 0,
+            bytes_rx: 0,
+            last_counted_pts_ms: None,
+            start_instant: Instant::now(),
         }
     }
 
@@ -89,9 +112,19 @@ impl App {
         if snap.jpeg.is_empty() {
             return;
         }
+        let jpeg_len = snap.jpeg.len();
+        let pts_ms = snap.pts_ms;
         match self.frame_view.ingest(ctx, &snap.jpeg, snap.pts_ms, snap.width, snap.height) {
             Ok(true) => {
                 self.seen_first_frame = true;
+                // Only count when ingest reports a new frame (returns
+                // true). Belt-and-suspenders against monotonic-pts
+                // reuse: also dedupe by last-seen pts_ms.
+                if self.last_counted_pts_ms != Some(pts_ms) {
+                    self.frame_count = self.frame_count.saturating_add(1);
+                    self.bytes_rx = self.bytes_rx.saturating_add(jpeg_len as u64);
+                    self.last_counted_pts_ms = Some(pts_ms);
+                }
             }
             Ok(false) => {}
             Err(e) => {
@@ -224,6 +257,10 @@ impl App {
         }
         ctx.request_repaint_after(Duration::from_millis(33));
 
+        // Paint everything non-interactive into the central panel's
+        // painter at video_rect. The interactive Cancel button is hoisted
+        // into a foreground egui::Area below so its hit-rect lives on a
+        // higher layer than the video Image and actually receives clicks.
         let painter = ui.painter_at(video_rect);
         painter.rect_filled(
             video_rect,
@@ -311,44 +348,141 @@ impl App {
             );
         }
 
-        // Issue 3: a Cancel button beside the spinner. Click sends
-        // CancelStream to the daemon; the daemon flips status to Idle
-        // and re-publishes the pairing ticket, and the GUI's apply_msg
-        // path clears `latest_frame` so the pairing screen comes back.
-        let cancel_rect = egui::Rect::from_center_size(
-            egui::pos2(center.x, center.y + 64.0),
-            egui::vec2(120.0, 28.0),
-        );
-        let cancel_resp = ui.interact(
-            cancel_rect,
-            egui::Id::new("herd-scout-reconnect-cancel"),
-            egui::Sense::click(),
-        );
-        let bg = if cancel_resp.hovered() {
-            egui::Color32::from_rgba_unmultiplied(80, 80, 80, 220)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200)
-        };
-        painter.rect_filled(cancel_rect, 4.0, bg);
-        painter.rect_stroke(
-            cancel_rect,
-            4.0,
-            egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgba_unmultiplied(180, 180, 180, 200),
-            ),
-            egui::StrokeKind::Outside,
-        );
-        painter.text(
-            cancel_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "Cancel",
-            egui::FontId::proportional(13.0),
-            egui::Color32::from_rgba_unmultiplied(240, 240, 240, 240),
-        );
-        if cancel_resp.clicked() {
-            self.handle.try_send(ClientMsg::CancelStream);
-        }
+        // Cancel button — hoisted into a foreground egui::Area so its
+        // hit-rect lives in a layer ABOVE the central panel's video
+        // Image. Without this, the Image (created earlier in the frame
+        // with Sense::click via `add_sized`) swallows the click for the
+        // entire video_rect, and the Cancel button's `interact` rect
+        // never receives the press. Areas are hit-tested separately
+        // and ordered above the central panel.
+        //
+        // The Area is anchored to the screen using a fixed_pos derived
+        // from video_rect.center() + offset so it tracks the spinner.
+        let cancel_pos = egui::pos2(center.x - 60.0, center.y + 50.0);
+        egui::Area::new(egui::Id::new("herd-scout-reconnect-cancel-area"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(cancel_pos)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let resp = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("Cancel")
+                            .size(13.0)
+                            .color(egui::Color32::from_rgba_unmultiplied(240, 240, 240, 240)),
+                    )
+                    .min_size(egui::vec2(120.0, 28.0))
+                    .fill(egui::Color32::from_rgba_unmultiplied(50, 50, 50, 220))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(180, 180, 180, 220),
+                    )),
+                );
+                if resp.clicked() {
+                    tracing::info!("GUI: Cancel button clicked on reconnect overlay");
+                    self.handle.try_send(ClientMsg::CancelStream);
+                }
+            });
+    }
+
+    fn draw_hud(&self, ui: &mut egui::Ui, status: &ConnectionStatus) {
+        // Two-column layout: ASCII art + version on the left, live stats
+        // on the right. Compact (<=100 px tall) so it doesn't crowd the
+        // video viewport.
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(HUD_ASCII)
+                        .font(egui::FontId::monospace(11.0))
+                        .color(egui::Color32::from_rgb(210, 200, 160)),
+                );
+            });
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.add_space(4.0);
+
+                // Row 1: brand + version
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("herd-scout")
+                            .strong()
+                            .size(13.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .color(egui::Color32::DARK_GRAY)
+                            .size(11.0),
+                    );
+                    let daemon_ver = self.state.daemon_version.read().clone();
+                    if let Some(dv) = daemon_ver {
+                        ui.label(
+                            egui::RichText::new(format!("· daemon {dv}"))
+                                .color(egui::Color32::DARK_GRAY)
+                                .size(11.0),
+                        );
+                    }
+                });
+
+                // Row 2: status + frame stats
+                ui.horizontal(|ui| {
+                    let (col, label) = status_chip(status);
+                    ui.colored_label(col, format!("● {label}"));
+                    let snap = self.state.latest_frame.read().clone();
+                    let res_text = if snap.width > 0 && snap.height > 0 {
+                        format!("{}x{}", snap.width, snap.height)
+                    } else {
+                        "—".to_string()
+                    };
+                    let age_text = self
+                        .frame_age()
+                        .map(|d| format!("age {} ms", d.as_millis()))
+                        .unwrap_or_else(|| "age —".to_string());
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Frame: {} · {} · {} frames",
+                            res_text, age_text, self.frame_count
+                        ))
+                        .font(egui::FontId::monospace(11.0))
+                        .color(egui::Color32::LIGHT_GRAY),
+                    );
+                });
+
+                // Row 3: CV stats
+                ui.horizontal(|ui| {
+                    let dets = self.state.latest_dets.read().clone();
+                    let cv_text = if dets.cv_disabled {
+                        "CV: disabled".to_string()
+                    } else {
+                        format!(
+                            "CV: {} cow · {} horse · {} sheep",
+                            dets.counts.cow, dets.counts.horse, dets.counts.sheep
+                        )
+                    };
+                    ui.label(
+                        egui::RichText::new(cv_text)
+                            .font(egui::FontId::monospace(11.0))
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                });
+
+                // Row 4: net + uptime
+                ui.horizontal(|ui| {
+                    let mb = (self.bytes_rx as f64) / (1024.0 * 1024.0);
+                    let uptime = format_uptime(self.start_instant.elapsed());
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Net: {:.1} MB rx · uptime {}",
+                            mb, uptime
+                        ))
+                        .font(egui::FontId::monospace(11.0))
+                        .color(egui::Color32::LIGHT_GRAY),
+                    );
+                });
+            });
+        });
     }
 }
 
@@ -372,6 +506,15 @@ impl eframe::App for App {
         if !dets_snap.dets.is_empty() {
             self.last_det_at = Some(Instant::now());
         }
+
+        // Bottom HUD: ASCII glyph + live stats. Drawn before the central
+        // panel so the central panel's available_size() is computed
+        // against the remaining viewport.
+        egui::TopBottomPanel::bottom("hud")
+            .min_height(82.0)
+            .show(ctx, |ui| {
+                self.draw_hud(ui, &status);
+            });
 
         egui::TopBottomPanel::top("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -458,5 +601,44 @@ fn status_chip(status: &ConnectionStatus) -> (egui::Color32, &'static str) {
         ConnectionStatus::Connected => (egui::Color32::GREEN, status.label()),
         ConnectionStatus::Reconnecting { .. } => (egui::Color32::ORANGE, status.label()),
         ConnectionStatus::Stopped => (egui::Color32::RED, status.label()),
+    }
+}
+
+/// Format a duration as `HH:MM:SS` for the HUD uptime row.
+fn format_uptime(d: Duration) -> String {
+    let total = d.as_secs();
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_uptime_zero() {
+        assert_eq!(format_uptime(Duration::from_secs(0)), "00:00:00");
+    }
+
+    #[test]
+    fn format_uptime_minutes_seconds() {
+        assert_eq!(format_uptime(Duration::from_secs(125)), "00:02:05");
+    }
+
+    #[test]
+    fn format_uptime_hours() {
+        assert_eq!(
+            format_uptime(Duration::from_secs(3 * 3600 + 7 * 60 + 42)),
+            "03:07:42"
+        );
+    }
+
+    #[test]
+    fn hud_ascii_is_four_lines() {
+        // Sanity-check the constant so a future edit doesn't blow out
+        // the bottom panel height.
+        assert_eq!(HUD_ASCII.lines().count(), 4);
     }
 }
