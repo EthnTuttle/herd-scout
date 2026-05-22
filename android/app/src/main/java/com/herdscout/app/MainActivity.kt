@@ -2,9 +2,11 @@ package com.herdscout.app
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.Surface
 import android.view.View
 import android.widget.Button
 import android.widget.TextView
@@ -46,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var disconnectButton: Button
     private lateinit var statusOverlay: TextView
     private lateinit var previewView: PreviewView
+    private lateinit var orientationHint: TextView
 
     private val scanLauncher = registerForActivityResult(QrScanActivity.Companion.Contract()) { result ->
         if (result.isNullOrBlank()) {
@@ -81,6 +84,7 @@ class MainActivity : AppCompatActivity() {
         disconnectButton = findViewById(R.id.disconnectButton)
         statusOverlay = findViewById(R.id.statusOverlay)
         previewView = findViewById(R.id.cameraPreview)
+        orientationHint = findViewById(R.id.orientationHint)
 
         scanButton.setOnClickListener { onScanClicked() }
         startStopButton.setOnClickListener { onStartStopClicked() }
@@ -89,6 +93,36 @@ class MainActivity : AppCompatActivity() {
         requestRuntimePermissions()
         wireStateObservers()
         refreshButtons()
+        updateOrientationHint()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateOrientationHint()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateOrientationHint()
+    }
+
+    /**
+     * Show / hide the "rotate to landscape" banner based on the device
+     * display rotation. CameraX is locked to `targetRotation = ROTATION_90`
+     * (StreamingController.startStreaming) so frames are landscape
+     * regardless, but holding the phone in landscape is what the user
+     * expects when they're watching the daemon's live feed — the on-screen
+     * preview also rotates to match. We only nag in portrait orientations.
+     */
+    private fun updateOrientationHint() {
+        val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.rotation ?: Surface.ROTATION_0
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.rotation
+        }
+        val isLandscape = rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270
+        orientationHint.visibility = if (isLandscape) View.GONE else View.VISIBLE
     }
 
     override fun onDestroy() {

@@ -13,4 +13,5 @@
     <string name="qr_hint_low_light">Low light? Tap the torch button to help the scanner.</string>
     <string name="qr_torch_on">Torch ON</string>
     <string name="qr_torch_off">Torch OFF</string>
+    <string name="orientation_hint">↻  Rotate phone to landscape for correct video orientation</string>
 </resources>
