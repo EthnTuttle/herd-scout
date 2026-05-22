@@ -164,16 +164,42 @@ tasks.register<Exec>("cargoNdkBuildDebug") {
         "build", "-p", rustCrateName,
     )
 
-    // After cargo-ndk runs, drop sibling `.so` files it copied from C deps so
-    // the APK stays small. We keep only our cdylib.
+    // cargo-ndk copies sibling Rust dylibs (transitive cdylib deps) next to our
+    // cdylib. Drop the ones we don't need to keep the APK small — but explicitly
+    // copy `libc++_shared.so` from the NDK because our cdylib has it as a NEEDED
+    // dynamic dep (verified via `llvm-readelf -d`). Without it the APK installs
+    // but System.loadLibrary fails with:
+    //   UnsatisfiedLinkError: dlopen failed: library "libc++_shared.so" not found
+    val keep = setOf(rustLibName, "libc++_shared.so")
     doLast {
         val abiDir = File(jniLibsDir, "arm64-v8a")
         if (abiDir.isDirectory) {
             abiDir.listFiles()?.forEach { f ->
-                if (f.name != rustLibName && f.name.endsWith(".so")) {
+                if (f.name !in keep && f.name.endsWith(".so")) {
                     logger.info("Pruning extra jniLib: ${f.name}")
                     f.delete()
                 }
+            }
+        }
+        // cargo-ndk does NOT bundle libc++_shared.so even though our cdylib is
+        // dynamically linked against it. Copy it from the NDK sysroot ourselves.
+        if (ndkHome != null) {
+            val hostTag = when {
+                OperatingSystem.current().isMacOsX -> "darwin-x86_64"
+                OperatingSystem.current().isLinux -> "linux-x86_64"
+                OperatingSystem.current().isWindows -> "windows-x86_64"
+                else -> "darwin-x86_64"
+            }
+            val src = File(
+                ndkHome,
+                "toolchains/llvm/prebuilt/$hostTag/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+            )
+            if (src.isFile) {
+                val dst = File(abiDir, "libc++_shared.so")
+                src.copyTo(dst, overwrite = true)
+                logger.lifecycle("Copied libc++_shared.so from NDK sysroot to $dst")
+            } else {
+                logger.warn("libc++_shared.so not found at $src — APK will crash on load")
             }
         }
     }

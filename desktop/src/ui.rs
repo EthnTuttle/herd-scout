@@ -2,15 +2,20 @@
 //!
 //! Lifecycle:
 //! 1. `App::new` is called from inside `eframe::run_native`. It receives
-//!    an idle (or pre-populated) [`StreamHandle`] from the streaming
-//!    task and an optional initial [`LiveTicket`] resolved by `main.rs`.
-//! 2. If no ticket was supplied, `update()` paints the **pairing
-//!    screen** (Wave 5A): a paste box for the ticket string plus a QR
-//!    of any current ticket so the phone can scan it back.
-//! 3. Once a ticket is pasted (or already present), `update()` paints
-//!    the live video, the CV overlay (Wave 3), the frame-age stamp,
-//!    and the **reconnect overlay** (Wave 5A) when frames are stale or
-//!    the connection is dropping.
+//!    a [`StreamHandle`] from the streaming task. The handle's
+//!    `current_ticket` watch starts populated when launched from
+//!    env/CLI/saved-store, or transitions `None → Some` once Wave 5C's
+//!    auto-mint task has bound its iroh endpoint and minted a fresh
+//!    ticket.
+//! 2. Until at least one frame has been decoded, `update()` paints the
+//!    **pairing screen** (Wave 5A + 5C): a large QR code of the current
+//!    ticket as the primary affordance, plus a collapsed "Advanced"
+//!    expander that reveals the original paste-box for headless /
+//!    debugging use.
+//! 3. Once a frame arrives, `update()` paints the live video, the CV
+//!    overlay (Wave 3), the frame-age stamp, and the **reconnect
+//!    overlay** (Wave 5A) when frames are stale or the connection is
+//!    dropping.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,11 +54,15 @@ pub struct App {
     /// Shared snapshot owned jointly with the CV inference task.
     snapshot: SharedSnapshot,
     /// The ticket the live stream is currently bound to, if any. When
-    /// `None`, the pairing screen is shown. When `Some`, we keep a
-    /// clone so the UI can render it back as a QR code (useful when
-    /// the phone is the scanner side).
+    /// `None`, the pairing screen shows a "minting…" placeholder
+    /// (Wave 5C: typically only visible for a second or two while the
+    /// auto-mint endpoint binds). When `Some`, the QR is rendered.
+    ///
+    /// Kept in sync with `stream.current_ticket()` each repaint via
+    /// [`Self::sync_ticket_from_stream`].
     current_ticket: Option<LiveTicket>,
-    /// Live contents of the paste box on the pairing screen.
+    /// Live contents of the paste box on the pairing screen's
+    /// collapsed "Advanced" expander.
     pairing_input: String,
     /// Cached parse error for the paste box. Empty string means
     /// "no error / no input yet" so we draw no chrome.
@@ -73,7 +82,6 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         stream: StreamHandle,
         snapshot: SharedSnapshot,
-        ticket: Option<LiveTicket>,
     ) -> Self {
         let frame_view = FrameView::new(&cc.egui_ctx, "herd-scout-video");
         let mut app = Self {
@@ -82,21 +90,49 @@ impl App {
             last_rendered_ts: None,
             last_frame_dims: None,
             snapshot,
-            current_ticket: None, // set via `set_ticket` below so the QR cache is built
+            current_ticket: None,
             pairing_input: String::new(),
             pairing_error: String::new(),
             qr_texture: None,
             egui_ctx: cc.egui_ctx.clone(),
         };
-        if let Some(t) = ticket {
-            app.set_ticket(t);
-        }
+        // If the streaming task already had a ticket at construction
+        // time (env/CLI/saved-store path), the watch was seeded
+        // synchronously, so this picks it up on the first call.
+        app.sync_ticket_from_stream();
         app
     }
 
+    /// Wave 5C: pull the latest ticket value from the streaming task's
+    /// watch channel. When it transitions from `None → Some(_)` (or
+    /// from one ticket to a different one — e.g. after a re-pair via
+    /// the paste box), rebuild the QR texture.
+    ///
+    /// Cheap to call every paint: the watch borrow is a `RwLock` read,
+    /// and the `Option<LiveTicket>` clone is one allocation. The QR
+    /// rebuild itself is gated on a value change.
+    fn sync_ticket_from_stream(&mut self) {
+        let next = self.stream.current_ticket();
+        let changed = match (&self.current_ticket, &next) {
+            (None, None) => false,
+            (Some(a), Some(b)) => a != b,
+            _ => true,
+        };
+        if !changed {
+            return;
+        }
+        match next {
+            Some(t) => self.set_ticket(t),
+            None => {
+                self.current_ticket = None;
+                self.qr_texture = None;
+            }
+        }
+    }
+
     /// Updates the cached ticket and rebuilds the QR texture. Called
-    /// from [`Self::new`] when a boot-time ticket was supplied and
-    /// from [`Self::connect_with_ticket`] after a successful pairing.
+    /// from [`Self::sync_ticket_from_stream`] when the streaming
+    /// task's `current_ticket` watch changes.
     fn set_ticket(&mut self, ticket: LiveTicket) {
         // Rebuild the QR texture. `render_qr_image` returns Err only
         // for absurdly long inputs (>4 KB-ish); a `LiveTicket` has a
@@ -124,24 +160,36 @@ impl App {
     /// Respawn the streaming task with a freshly-pasted ticket and
     /// transition the UI out of the pairing screen.
     ///
-    /// Called from the pairing-screen "Connect" button. The previous
-    /// stream task (if any) was either idle (`AwaitingTicket`) or
-    /// already long-lived; in either case we just drop the old
-    /// handle. Tokio's watch channels are reference-counted, so the
-    /// CV inference task keeps observing the now-orphaned channel
-    /// (it'll see no further frames there but its receiver stays
-    /// open). For Wave 5A this means the **first** successful pairing
-    /// is what the CV task actually consumes from; re-pairs after
-    /// that get reflected in the UI but the CV stream stays bound to
-    /// the original receiver. Acceptable for MVP — re-pairing is
-    /// expected to be rare and the user can restart the app to
+    /// **Wave 5C demoted path.** Wave 5A originally called this from
+    /// the visible "Connect" button on the pairing screen; Wave 5C
+    /// auto-mints a ticket up-front, so this is now reachable only
+    /// from the collapsed "Advanced" expander. The codepath is kept
+    /// intact for headless / debugging use cases where the operator
+    /// has a known-good ticket from elsewhere (e.g. another desktop
+    /// instance, a saved file, or — until the directionality bug is
+    /// fixed — a ticket the phone minted itself).
+    ///
+    /// The previous stream task (if any) was either auto-minting,
+    /// idle, or already long-lived; in either case we just drop the
+    /// old handle. Tokio's watch channels are reference-counted, so
+    /// the CV inference task keeps observing the now-orphaned
+    /// channel (it'll see no further frames there but its receiver
+    /// stays open). For Wave 5A this means the **first** successful
+    /// pairing is what the CV task actually consumes from; re-pairs
+    /// after that get reflected in the UI but the CV stream stays
+    /// bound to the original receiver. Acceptable for MVP — re-pairing
+    /// is expected to be rare and the user can restart the app to
     /// rebind the CV task.
     fn connect_with_ticket(&mut self, ticket: LiveTicket) {
         tracing::info!(
             broadcast = %ticket.broadcast_name,
-            "re-spawning stream task with paired ticket"
+            "re-spawning stream task with manually-pasted ticket"
         );
-        self.stream = stream::spawn(Some(ticket.clone()), self.egui_ctx.clone());
+        // No `Store` is threaded through here today — the streaming
+        // task's auto-mint path is the only saver. For a manually-
+        // pasted ticket we still want to persist it so the next
+        // launch reuses it; do that out-of-band below.
+        self.stream = stream::spawn(Some(ticket.clone()), None, self.egui_ctx.clone());
         self.last_rendered_ts = None; // force a fresh first-frame paint
         self.last_frame_dims = None;
         self.set_ticket(ticket.clone());
@@ -295,94 +343,76 @@ impl App {
         }
     }
 
-    /// Wave 5A: the "Pair with phone" screen.
+    /// Wave 5C: the QR-first "Pair with phone" screen.
     ///
-    /// Drawn in the central panel when no ticket is bound yet. Shows a
-    /// paste box, a Connect button (gated on a successful parse), and
-    /// — when a ticket *is* bound but no frames have arrived yet — a
-    /// QR rendering of the current ticket so the phone can scan it
-    /// back. The QR display is also useful as a sanity check while
-    /// pairing: the user can confirm the desktop has the same ticket
-    /// the phone displays.
+    /// Drawn in the central panel until the first frame arrives. The
+    /// primary affordance is a large QR rendering of the current
+    /// ticket so the operator points the phone's camera at the desktop
+    /// and the phone's MlKit scanner picks it up. The Wave 5A paste
+    /// box is preserved as a collapsed "Advanced" expander beneath
+    /// the QR for headless / debugging use.
+    ///
+    /// Three states:
+    ///   * No ticket yet (auto-mint endpoint binding) → "minting…" hint.
+    ///   * Ticket present, no frames → QR + "waiting for phone…" copy.
+    ///   * Ticket present, frames arriving → this screen is no longer
+    ///     drawn (the live-video path takes over in `update()`).
     fn draw_pairing_screen(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(24.0);
-            ui.heading("Pair with phone");
+            ui.heading("Scan this on your phone");
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(
-                    "Open herd-scout on your phone, copy its ticket, and paste it below.",
+                    "Open herd-scout on your phone and point its camera at this QR.",
                 )
                 .color(egui::Color32::GRAY)
                 .size(13.0),
             );
             ui.add_space(20.0);
 
-            // Optional QR of the *currently bound* ticket. Useful when
-            // the desktop is the ticket-generator side (so the phone
-            // scans this) — see the directional note in
-            // `pairing/mod.rs`. Hidden in the no-ticket case.
+            // Primary affordance: the QR. When the streaming task is
+            // still binding its iroh endpoint we render a small
+            // placeholder so the screen doesn't look empty.
             if let Some(tex) = self.qr_texture.as_ref() {
+                ui.image((tex.id(), egui::vec2(256.0, 256.0)));
+                ui.add_space(12.0);
                 ui.label(
-                    egui::RichText::new("Or scan this from the phone:")
+                    egui::RichText::new("herd-scout is waiting for the phone to publish…")
                         .color(egui::Color32::GRAY)
                         .size(12.0),
                 );
-                ui.add_space(4.0);
-                ui.image((tex.id(), egui::vec2(256.0, 256.0)));
-                ui.add_space(12.0);
+            } else {
+                // Auto-mint in flight; the iroh endpoint takes ~1-2s
+                // to bind on first launch.
+                ui.add_space(64.0);
+                ui.spinner();
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Minting a fresh pairing ticket…")
+                        .color(egui::Color32::GRAY)
+                        .size(13.0),
+                );
+                ui.add_space(64.0);
             }
 
-            // The paste box itself. We want a wide single-line text
-            // input — `singleline=true` rejects newlines so paste of
-            // a copied-with-trailing-newline ticket still parses.
+            ui.add_space(20.0);
+
+            // Wave 5C: demoted-but-preserved paste-box path. Headless
+            // launches still have HERD_SCOUT_TICKET / --ticket; the
+            // expander below is for when the operator already has a
+            // ticket from elsewhere and wants to skip the auto-mint
+            // (e.g. they're hand-driving a phone-side test).
             ui.scope(|ui| {
                 ui.set_max_width(640.0);
-                ui.horizontal(|ui| {
-                    ui.label("Ticket:");
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.pairing_input)
-                            .hint_text("iroh-live:…")
-                            .desired_width(f32::INFINITY)
-                            .font(egui::FontId::monospace(12.0)),
-                    );
-                    if resp.changed() {
-                        // Re-validate on every keystroke so the
-                        // Connect button stays in sync.
-                        self.pairing_error = match pairing::validate_paste(&self.pairing_input) {
-                            Ok(_) => String::new(),
-                            Err(msg) => msg,
-                        };
-                    }
-                });
+                egui::CollapsingHeader::new("Paste a ticket from the phone instead")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        self.draw_paste_box(ui);
+                    });
             });
 
-            ui.add_space(8.0);
-
-            // Inline error message (only when we have one).
-            if !self.pairing_error.is_empty() {
-                ui.colored_label(egui::Color32::LIGHT_RED, &self.pairing_error);
-                ui.add_space(8.0);
-            }
-
-            // Connect button. Enabled only on a clean parse of the
-            // current paste-box contents.
-            let parsed = pairing::validate_paste(&self.pairing_input).ok();
-            let enabled = parsed.is_some();
-            let button = egui::Button::new(
-                egui::RichText::new("Connect")
-                    .size(15.0)
-                    .strong(),
-            )
-            .min_size(egui::vec2(140.0, 32.0));
-            let clicked = ui.add_enabled(enabled, button).clicked();
-            if clicked {
-                if let Some(t) = parsed {
-                    self.connect_with_ticket(t);
-                }
-            }
-
-            ui.add_space(24.0);
+            ui.add_space(16.0);
             ui.label(
                 egui::RichText::new(
                     "Headless launches: set HERD_SCOUT_TICKET or pass --ticket on the CLI.",
@@ -391,6 +421,66 @@ impl App {
                 .size(11.0),
             );
         });
+    }
+
+    /// The Wave 5A paste-box body, factored out so [`Self::draw_pairing_screen`]
+    /// can host it inside a `CollapsingHeader`. Identical behaviour to
+    /// the pre-5C version: live-validate on every keystroke, gate the
+    /// Connect button on a clean parse, and call
+    /// [`Self::connect_with_ticket`] on click.
+    fn draw_paste_box(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Useful when you already have a ticket string from a phone-side test or another desktop.",
+            )
+            .color(egui::Color32::GRAY)
+            .size(11.0),
+        );
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Ticket:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.pairing_input)
+                    .hint_text("iroh-live:…")
+                    .desired_width(f32::INFINITY)
+                    .font(egui::FontId::monospace(12.0)),
+            );
+            if resp.changed() {
+                // Re-validate on every keystroke so the
+                // Connect button stays in sync.
+                self.pairing_error = match pairing::validate_paste(&self.pairing_input) {
+                    Ok(_) => String::new(),
+                    Err(msg) => msg,
+                };
+            }
+        });
+
+        ui.add_space(6.0);
+
+        // Inline error message (only when we have one).
+        if !self.pairing_error.is_empty() {
+            ui.colored_label(egui::Color32::LIGHT_RED, &self.pairing_error);
+            ui.add_space(6.0);
+        }
+
+        // Connect button. Enabled only on a clean parse of the
+        // current paste-box contents.
+        let parsed = pairing::validate_paste(&self.pairing_input).ok();
+        let enabled = parsed.is_some();
+        let button = egui::Button::new(
+            egui::RichText::new("Connect")
+                .size(14.0)
+                .strong(),
+        )
+        .min_size(egui::vec2(120.0, 28.0));
+        let clicked = ui.add_enabled(enabled, button).clicked();
+        if clicked {
+            if let Some(t) = parsed {
+                self.connect_with_ticket(t);
+            }
+        }
     }
 
     /// Wave 5A: translucent "reconnecting…" overlay drawn on top of the
@@ -501,6 +591,12 @@ impl eframe::App for App {
         // keep latency low under load.
         ctx.request_repaint_after(Duration::from_millis(16));
 
+        // Wave 5C: observe the streaming task's `current_ticket` watch
+        // and rebuild the QR cache on transition. This is the
+        // mechanism that lets the auto-mint path surface its freshly
+        // minted ticket to the UI without a side-channel.
+        self.sync_ticket_from_stream();
+
         self.drain_frames();
 
         let status = self.stream.status();
@@ -529,25 +625,14 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(0.0))
             .show(ctx, |ui| {
-                // No ticket bound yet → pairing screen.
-                if self.current_ticket.is_none() {
-                    self.draw_pairing_screen(ui);
-                    return;
-                }
-
+                // Wave 5C: pairing screen until the first frame arrives.
+                // Previously gated on `current_ticket.is_none()`; now we
+                // always have a ticket (auto-minted if nothing else),
+                // so we gate on "no frames yet" instead. The pairing
+                // screen itself handles the sub-state where the ticket
+                // has not yet been minted.
                 if self.last_rendered_ts.is_none() {
-                    placeholder(
-                        ui,
-                        match &status {
-                            ConnectionStatus::Connected => "Connected — waiting for first frame…",
-                            ConnectionStatus::Connecting => "Connecting to publisher…",
-                            ConnectionStatus::Reconnecting { .. } => {
-                                "Lost connection — reconnecting…"
-                            }
-                            ConnectionStatus::AwaitingTicket => "Waiting for ticket…",
-                            ConnectionStatus::Stopped => "Stream stopped.",
-                        },
-                    );
+                    self.draw_pairing_screen(ui);
                     return;
                 }
 
@@ -585,12 +670,6 @@ impl eframe::App for App {
                 );
             });
     }
-}
-
-fn placeholder(ui: &mut egui::Ui, msg: &str) {
-    ui.centered_and_justified(|ui| {
-        ui.label(egui::RichText::new(msg).color(egui::Color32::GRAY).size(16.0));
-    });
 }
 
 fn status_chip(status: &ConnectionStatus) -> (egui::Color32, &'static str) {
