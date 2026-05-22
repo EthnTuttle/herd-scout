@@ -210,9 +210,9 @@ impl App {
     }
 
     fn draw_reconnect_overlay(
-        &self,
+        &mut self,
         ctx: &egui::Context,
-        ui: &egui::Ui,
+        ui: &mut egui::Ui,
         video_rect: egui::Rect,
         status: &ConnectionStatus,
     ) {
@@ -274,6 +274,81 @@ impl App {
             egui::FontId::proportional(13.0),
             egui::Color32::from_rgba_unmultiplied(200, 200, 200, 200),
         );
+
+        // Issue 1: always-visible small QR thumbnail in the bottom-left
+        // corner of the overlay so the user can re-pair without leaving
+        // the screen. The texture is the same one used by the pairing
+        // screen, just rendered smaller.
+        if let Some(tex) = self.qr_texture.as_ref() {
+            let thumb_size = 128.0_f32;
+            let margin = 16.0_f32;
+            let thumb_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    video_rect.left() + margin,
+                    video_rect.bottom() - thumb_size - margin - 18.0,
+                ),
+                egui::vec2(thumb_size, thumb_size),
+            );
+            // White backing so dark QR modules stay readable on the dim
+            // overlay.
+            painter.rect_filled(
+                thumb_rect.expand(4.0),
+                4.0,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 235),
+            );
+            painter.image(
+                tex.id(),
+                thumb_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            painter.text(
+                egui::pos2(thumb_rect.center().x, thumb_rect.bottom() + 4.0),
+                egui::Align2::CENTER_TOP,
+                "scan to re-pair",
+                egui::FontId::proportional(11.0),
+                egui::Color32::from_rgba_unmultiplied(230, 230, 230, 220),
+            );
+        }
+
+        // Issue 3: a Cancel button beside the spinner. Click sends
+        // CancelStream to the daemon; the daemon flips status to Idle
+        // and re-publishes the pairing ticket, and the GUI's apply_msg
+        // path clears `latest_frame` so the pairing screen comes back.
+        let cancel_rect = egui::Rect::from_center_size(
+            egui::pos2(center.x, center.y + 64.0),
+            egui::vec2(120.0, 28.0),
+        );
+        let cancel_resp = ui.interact(
+            cancel_rect,
+            egui::Id::new("herd-scout-reconnect-cancel"),
+            egui::Sense::click(),
+        );
+        let bg = if cancel_resp.hovered() {
+            egui::Color32::from_rgba_unmultiplied(80, 80, 80, 220)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200)
+        };
+        painter.rect_filled(cancel_rect, 4.0, bg);
+        painter.rect_stroke(
+            cancel_rect,
+            4.0,
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(180, 180, 180, 200),
+            ),
+            egui::StrokeKind::Outside,
+        );
+        painter.text(
+            cancel_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Cancel",
+            egui::FontId::proportional(13.0),
+            egui::Color32::from_rgba_unmultiplied(240, 240, 240, 240),
+        );
+        if cancel_resp.clicked() {
+            self.handle.try_send(ClientMsg::CancelStream);
+        }
     }
 }
 
@@ -283,6 +358,14 @@ impl eframe::App for App {
 
         self.sync_qr_from_ticket();
         self.drain_frame(ctx);
+
+        // If the daemon's apply_msg cleared `latest_frame` (e.g. user
+        // pressed Cancel and the daemon transitioned back to Idle),
+        // also reset our local "seen first frame" flag so the central
+        // panel falls back to the pairing screen.
+        if self.state.latest_frame.read().received_at.is_none() {
+            self.seen_first_frame = false;
+        }
 
         let status = self.state.status.read().clone();
         let dets_snap = self.state.latest_dets.read().clone();

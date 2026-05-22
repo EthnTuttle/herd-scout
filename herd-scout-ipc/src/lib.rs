@@ -168,6 +168,12 @@ pub enum ClientMsg {
     /// Forget the saved ticket; the daemon will mint a fresh one on
     /// the next request.
     ClearSavedTicket,
+    /// User pressed "Cancel" on the reconnect overlay. The daemon should
+    /// drop any in-flight session, return to `Idle`, and re-publish the
+    /// pairing ticket so the GUI can re-render the QR. The daemon's
+    /// `incoming_sessions` listener stays alive — the next phone dial
+    /// will be accepted as a fresh session.
+    CancelStream,
     /// Ask the daemon to shut down (graceful — actor drains).
     Shutdown,
 }

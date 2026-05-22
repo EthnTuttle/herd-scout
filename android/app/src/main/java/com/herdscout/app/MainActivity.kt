@@ -25,6 +25,11 @@ import kotlinx.coroutines.launch
  *    `connectWithTicket`, and on success enables Start Streaming.
  *  - **Start Streaming / Stop Streaming** toggles the CameraX -> JNI -> moq
  *    pipeline.
+ *    Wave 7 Issue 2: Stop now drops the JNI handle and returns to IDLE.
+ *    To start streaming again the user must rescan the QR (the desktop
+ *    re-shows the QR automatically when the session ends). This avoids
+ *    the "phantom session" bug where the daemon stayed in Reconnecting
+ *    forever because the phone reused a torn-down `MoqSession`.
  *  - **Disconnect** tears the session down completely.
  *
  * The status TextView shows: "Idle" / "Connected: <name>" / "Streaming

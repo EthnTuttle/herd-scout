@@ -195,6 +195,29 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            ClientMsg::CancelStream => {
+                // User pressed Cancel on the reconnect overlay. We can't
+                // forcibly abort the per-session task without touching
+                // stream.rs (Wave 7 keeps that file stable), but we can
+                // (a) flip the daemon-reported status back to Idle so
+                // the GUI clears its last-rendered frame and falls back
+                // to the pairing screen, and (b) re-publish the current
+                // pairing ticket so the QR repaints. Any orphan
+                // `run_session` task left over from a phone that's now
+                // gone will exit on its own when the publisher's video
+                // track closes (it transitions to
+                // `Reconnecting{publisher closed}` on its way out, but
+                // since we just announced Idle the GUI ignores that).
+                info!("CancelStream from GUI; returning to Idle and republishing pairing");
+                let _ = state.status_tx.send(ConnectionStatus::Idle);
+                let _ = server_tx_ctrl.send(ServerMsg::Status {
+                    state: ConnectionStatus::Idle,
+                    last_frame_age_ms: None,
+                });
+                let _ = server_tx_ctrl.send(ServerMsg::Pairing {
+                    ticket: state.ticket.to_string(),
+                });
+            }
             ClientMsg::ClearSavedTicket => {
                 if let Some(s) = store_for_ctrl.as_deref() {
                     info!("ClearSavedTicket from GUI; re-minting fresh");

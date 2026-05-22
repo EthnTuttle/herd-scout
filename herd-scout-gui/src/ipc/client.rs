@@ -192,6 +192,16 @@ fn apply_msg(state: &SharedClientState, msg: ServerMsg) {
             state: cs,
             last_frame_age_ms,
         } => {
+            // If the daemon transitions back to Idle (e.g. user pressed
+            // Cancel on the reconnect overlay), clear the cached last
+            // frame so the GUI falls back to the pairing screen instead
+            // of holding up the frozen final frame under a reconnect
+            // overlay forever.
+            let prev = state.status.read().clone();
+            if matches!(cs, ConnectionStatus::Idle) && !matches!(prev, ConnectionStatus::Idle) {
+                let mut g = state.latest_frame.write();
+                *g = LatestFrame::default();
+            }
             *state.status.write() = cs;
             *state.last_frame_age_ms.write() = last_frame_age_ms;
         }
