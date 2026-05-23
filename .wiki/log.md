@@ -21,6 +21,10 @@ Output: [[output/playbook-herd-scout-2026-05-20]] — strategic playbook with ph
 
 Generated RFC-format implementation plan grounded in the wiki research. MVP framing: phone is a streaming camera only (no on-device ML, no MAVLink, Android only), desktop runs all inference. Critical pre-work surfaced: `vendor/iroh-live/` is referenced in `Cargo.toml` but not present on disk; `desktop/src/main.rs` is a Hello-world stub. Phase 0 of the plan resolves this before any feature work.
 
+## [2026-05-22] plan | "deploying the daemon on the 1060 laptop setup" → output/plan-deploy-daemon-on-1060-laptop-2026-05-22.md (12 articles consulted: 5 project-local + 7 from gtx-1060-headless-ai-server hub wiki, 6 architecture decisions, 6 phases + 1 optional)
+
+Roadmap for deploying herd-scout-daemon as a headless systemd service on an MSI GS63VR (GTX 1060 6GB mobile) running Ubuntu Server 22.04 LTS. Key decisions: reuse the hub wiki's GS63VR baseline verbatim (Pascal forces proprietary nvidia-driver-535-server + CUDA 12.x ceiling); wire ort 2.0.0-rc.12 CUDA EP behind a `gpu` Cargo feature with runtime CPU fallback; build natively on the box for now; iroh's relay path replaces MediaMTX/SRT (different stack from the hub wiki's existing GS63VR plan); GUI on a different machine connects via SSH UDS forward. End-to-end e2e: phone → iroh-relay → laptop daemon → SSH UDS → remote GUI.
+
 Key findings:
 - farmOS dominates OSS FMS; livestock-specific layer is dramatically thin
 - L5 (FMS structured ingest of drone outputs) is broken across all OSS FMS — concrete bridge documented

@@ -56,3 +56,4 @@
 
 - [[output/playbook-herd-scout-2026-05-20]] — strategic playbook
 - [[output/plan-mobile-to-desktop-iroh-rfc-2026-05-20]] — RFC for the mobile-to-desktop iroh app MVP
+- [[output/plan-deploy-daemon-on-1060-laptop-2026-05-22]] — roadmap for deploying the daemon on the GTX 1060 GS63VR laptop (headless Ubuntu, ort+CUDA, systemd)
