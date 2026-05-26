@@ -1,0 +1,29 @@
+[Unit]
+Description=herd-scout CV sidecar (GPU YOLOv5n inference via onnxruntime-gpu)
+After=network-online.target
+# Make the daemon hold off on starting until the sidecar is up and bound.
+Before=herd-scout-daemon.service
+
+[Service]
+Type=simple
+User=bigdeal
+Group=bigdeal
+WorkingDirectory=/srv/aiworker/herd-scout/deploy/cv-sidecar
+EnvironmentFile=/etc/herd-scout-cv-sidecar.env
+ExecStart=/srv/aiworker/.venv/bin/python /srv/aiworker/herd-scout/deploy/cv-sidecar/cv_sidecar.py
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Sidecar writes the socket here; both sidecar and daemon need RW
+RuntimeDirectory=herd-scout
+RuntimeDirectoryMode=0775
+ReadWritePaths=/run/herd-scout
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

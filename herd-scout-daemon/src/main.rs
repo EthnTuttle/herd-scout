@@ -19,7 +19,9 @@
 //! HERD_SCOUT_TICKET="iroh-live:..." cargo run -p herd-scout-daemon
 //! ```
 
-mod cv;
+// `cv` is declared in `lib.rs` so it can be reached by `examples/cv-probe.rs`.
+// Everything else stays bin-private.
+use herd_scout_daemon::cv;
 mod ipc;
 mod pairing;
 mod preview;

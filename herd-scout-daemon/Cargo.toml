@@ -11,7 +11,11 @@ path = "src/main.rs"
 # === iroh-live + moq (workspace pins) ===
 iroh-live = { workspace = true }
 iroh-moq = { workspace = true }
-moq-media = { workspace = true }
+# The workspace pin sets default-features = false (so other workspace crates
+# can opt out of capture/audio). The daemon needs to DECODE H.264 + Opus
+# from the phone's MoQ broadcast, so we re-enable those two features here.
+# `capture` stays off — the daemon never captures locally; it's a subscriber.
+moq-media = { workspace = true, features = ["h264", "opus"] }
 iroh = { workspace = true }
 iroh-smol-kv = { workspace = true }
 
@@ -25,9 +29,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 parking_lot = "0.12"
 
-# === CV (Wave 3) ===
-ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
-ndarray = "0.17"
+# === CV (Wave 6.5: sidecar pivot) ===
+# Inference is offloaded to a Python sidecar (`deploy/cv-sidecar/`) over
+# a Unix socket. The Rust `ort` crate was retired from the daemon after
+# repeatedly deadlocking in static init on this project's Pascal target
+# (multiple ORT versions, multiple build modes — see model.rs docstring).
+# The daemon now only owns the wire protocol; image is still used for
+# RGBA buffer ergonomics in the rest of the codebase.
 image = "0.25"
 
 # === Persistence (Wave 5B) ===
@@ -35,6 +43,9 @@ directories = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.9"
+
+[features]
+default = []
 
 [dev-dependencies]
 tempfile = "3"

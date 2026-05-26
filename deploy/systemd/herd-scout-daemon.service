@@ -1,0 +1,32 @@
+[Unit]
+Description=herd-scout daemon (iroh-moq subscriber + YOLO inference)
+After=network-online.target herd-scout-cv-sidecar.service
+Wants=network-online.target
+Requires=herd-scout-cv-sidecar.service
+
+[Service]
+Type=simple
+User=bigdeal
+Group=bigdeal
+WorkingDirectory=/srv/aiworker/herd-scout
+EnvironmentFile=/etc/herd-scout-daemon.env
+ExecStart=/srv/aiworker/herd-scout/target/release/herd-scout-daemon
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
+NoNewPrivileges=yes
+# NOTE: Do not set ProtectSystem=strict or RuntimeDirectory=herd-scout here.
+# The cv-sidecar service owns /run/herd-scout (creates the dir, binds the
+# socket). With ProtectSystem=strict + RuntimeDirectory= on both services,
+# each unit gets a per-unit private bind-mount of /run/herd-scout, so the
+# socket the sidecar writes is invisible to the daemon. The sidecar still
+# isolates the directory; the daemon just connects to the host-visible
+# /run/herd-scout/cv.sock as user `bigdeal`.
+ProtectHome=read-only
+ReadWritePaths=/home/bigdeal/.local/share/herd-scout /run/user/1000/herd-scout /var/log
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target
