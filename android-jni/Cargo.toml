@@ -32,9 +32,20 @@ anyhow = "1"
 bytes = "1"
 
 # Always-on host-side deps so the crate compiles for `cargo check` on macOS/Linux
-# desktop without an NDK. The actual JNI surface lives behind cfg gates.
+# desktop without an NDK. The streaming JNI surface lives behind cfg gates;
+# the Wave 12 admin client is platform-agnostic so unit tests can run on host.
 [dependencies]
 tracing = "0.1"
+iroh = { workspace = true }
+herd-scout-ipc = { path = "../herd-scout-ipc" }
+herd-scout-identity = { path = "../herd-scout-identity" }
+tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "macros", "io-util"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

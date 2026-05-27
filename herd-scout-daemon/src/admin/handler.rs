@@ -313,56 +313,61 @@ impl ProtocolHandler for AdminHandler {
             }
         }
 
-        let (mut send, mut recv) = connection.accept_bi().await.map_err(AcceptError::from_err)?;
+        // Loop on bi-streams until the peer drops the connection. Each
+        // bi-stream carries one request → one reply. The phone reuses
+        // the connection across foreground polls (Decision 12) so it
+        // doesn't pay the QUIC handshake cost on every Status refresh.
+        loop {
+            let (mut send, mut recv) = match connection.accept_bi().await {
+                Ok(streams) => streams,
+                Err(_) => {
+                    // Peer closed the connection (or transport-level
+                    // error). Either way, we're done with this dial.
+                    return Ok(());
+                }
+            };
 
-        // One RPC per stream.
-        let req_bytes = match frame::read_frame(&mut recv).await {
-            Ok(Some(b)) => b,
-            Ok(None) => {
-                warn!(
-                    remote = %remote.fmt_short(),
-                    "admin: stream closed before request",
-                );
-                return Ok(());
+            let req_bytes = match frame::read_frame(&mut recv).await {
+                Ok(Some(b)) => b,
+                Ok(None) => continue, // empty stream; skip
+                Err(e) => {
+                    warn!(
+                        remote = %remote.fmt_short(),
+                        "admin: framing error: {e:#}",
+                    );
+                    continue;
+                }
+            };
+
+            let req: AdminClientMsg = match serde_json::from_slice(&req_bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    let reply = AdminServerMsg::Error {
+                        code: "bad_request".to_string(),
+                        message: format!("parse error: {e}"),
+                    };
+                    let bytes = serde_json::to_vec(&reply).unwrap_or_default();
+                    let _ = frame::write_frame(&mut send, &bytes).await;
+                    let _ = send.finish();
+                    continue;
+                }
+            };
+
+            info!(
+                remote = %remote.fmt_short(),
+                req = ?req,
+                "admin: dispatching",
+            );
+
+            let reply = self.dispatch(req.clone()).await;
+            self.audit_rpc(remote, &req, &reply).await;
+            let bytes =
+                serde_json::to_vec(&reply).expect("AdminServerMsg always serializes");
+            if let Err(e) = frame::write_frame(&mut send, &bytes).await {
+                warn!(remote = %remote.fmt_short(), "admin: write reply failed: {e:#}");
             }
-            Err(e) => {
-                warn!(
-                    remote = %remote.fmt_short(),
-                    "admin: framing error: {e:#}",
-                );
-                return Ok(());
-            }
-        };
-
-        let req: AdminClientMsg = match serde_json::from_slice(&req_bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                let reply = AdminServerMsg::Error {
-                    code: "bad_request".to_string(),
-                    message: format!("parse error: {e}"),
-                };
-                let bytes = serde_json::to_vec(&reply).unwrap_or_default();
-                let _ = frame::write_frame(&mut send, &bytes).await;
-                let _ = send.finish();
-                return Ok(());
-            }
-        };
-
-        info!(
-            remote = %remote.fmt_short(),
-            req = ?req,
-            "admin: dispatching",
-        );
-
-        let reply = self.dispatch(req.clone()).await;
-        self.audit_rpc(remote, &req, &reply).await;
-        let bytes =
-            serde_json::to_vec(&reply).expect("AdminServerMsg always serializes");
-        if let Err(e) = frame::write_frame(&mut send, &bytes).await {
-            warn!(remote = %remote.fmt_short(), "admin: write reply failed: {e:#}");
+            let _ = send.finish();
         }
-        let _ = send.finish();
-        Ok(())
     }
 }
 
