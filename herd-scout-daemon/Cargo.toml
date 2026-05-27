@@ -51,6 +51,9 @@ rand = "0.9"
 arc-swap = "1"
 toml = "0.8"
 
+# === Wave 12: audit log ===
+time = { version = "0.3", features = ["formatting", "macros"] }
+
 [features]
 default = []
 

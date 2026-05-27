@@ -23,6 +23,7 @@
 // Everything else stays bin-private.
 use herd_scout_daemon::cv;
 mod admin;
+mod audit;
 mod control;
 mod daemon_secret;
 mod ipc;
@@ -84,19 +85,64 @@ async fn main() -> Result<()> {
     let own_node_id = endpoint.id();
 
     // Wave 11 control plane: load `control.toml` (fail-closed), spawn a
-    // SIGHUP-triggered reloader, build the handler.
+    // SIGHUP-triggered reloader, build the handler. Wave 12 adds the
+    // shared `ControlMetrics` and `Audit` so SSH bridge events and
+    // admin RPCs land in the same on-disk log.
     let control_cfg = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
         control::load_or_default(&control::config_path()).unwrap_or_else(|e| {
             warn!("control: bad config at startup, closing control plane: {e:#}");
             control::ControlConfig::default()
         }),
     ));
-    control::spawn_sighup_reloader(control_cfg.clone());
-    let control_handler = control::ControlHandler::new(control_cfg.clone(), own_node_id);
+    let metrics = audit::ControlMetrics::new();
+    let audit_log = match audit::audit_dir().and_then(|d| Ok(d)) {
+        Ok(dir) => match audit::Audit::open(dir).await {
+            Ok(a) => {
+                audit::spawn_rotation_task(a.clone());
+                a
+            }
+            Err(e) => {
+                error!("audit: open failed (audit log disabled): {e:#}");
+                // Last-ditch: open under /tmp so the daemon still works.
+                audit::Audit::open(std::env::temp_dir().join("herd-scout-audit"))
+                    .await
+                    .expect("temp_dir audit fallback")
+            }
+        },
+        Err(e) => {
+            error!("audit: cannot resolve audit dir: {e:#}");
+            audit::Audit::open(std::env::temp_dir().join("herd-scout-audit"))
+                .await
+                .expect("temp_dir audit fallback")
+        }
+    };
+    metrics.record_reload("boot");
+    audit_log
+        .log(
+            "daemon_boot",
+            Some(own_node_id.to_string()),
+            None,
+            serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "allowed_count": control_cfg.load().allowed.len(),
+                "admins_count": control_cfg.load().admins.len(),
+            }),
+        )
+        .await;
+
+    control::spawn_sighup_reloader(control_cfg.clone(), metrics.clone(), audit_log.clone());
+    let control_handler = control::ControlHandler::new(
+        control_cfg.clone(),
+        own_node_id,
+        metrics.clone(),
+        audit_log.clone(),
+    );
     let admin_handler = admin::AdminHandler::new(
         control_cfg.clone(),
         own_node_id,
         control::config_path(),
+        audit_log.clone(),
+        metrics.clone(),
     );
 
     // Mount moq + gossip via Live::register_protocols, then add our
@@ -112,6 +158,7 @@ async fn main() -> Result<()> {
         id = %live.endpoint().id().fmt_short(),
         allowed = control_cfg.load().allowed_node_ids.len(),
         admins = control_cfg.load().admins.len(),
+        audit_dir = %audit_log.dir().display(),
         "iroh endpoint bound, control plane up",
     );
 

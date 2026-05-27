@@ -12,15 +12,18 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use arc_swap::ArcSwap;
 use herd_scout_ipc::{AdminClientMsg, AdminServerMsg, AllowedEntry, StatusReply};
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
+use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::audit::{Audit, ControlMetrics};
 use crate::control::{ControlConfig, write_atomic};
 use crate::ipc::frame;
 
@@ -29,6 +32,8 @@ pub(crate) struct AdminHandler {
     cfg: Arc<ArcSwap<ControlConfig>>,
     own_node_id: EndpointId,
     config_path: PathBuf,
+    audit: Audit,
+    metrics: Arc<ControlMetrics>,
     /// Serializes mutating RPCs so two concurrent admins observe the
     /// same read-modify-write order. Read RPCs do not take this lock.
     write_lock: Arc<Mutex<()>>,
@@ -39,11 +44,15 @@ impl AdminHandler {
         cfg: Arc<ArcSwap<ControlConfig>>,
         own_node_id: EndpointId,
         config_path: PathBuf,
+        audit: Audit,
+        metrics: Arc<ControlMetrics>,
     ) -> Self {
         Self {
             cfg,
             own_node_id,
             config_path,
+            audit,
+            metrics,
             write_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -53,11 +62,17 @@ impl AdminHandler {
         StatusReply {
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             own_node_id: self.own_node_id.to_string(),
-            active_ssh_sessions: 0, // Phase 4 wires the real counter
+            active_ssh_sessions: self
+                .metrics
+                .active_ssh_sessions
+                .load(Ordering::Acquire) as u32,
             admins_count: cfg.admins.len() as u32,
             allowed_count: cfg.allowed.len() as u32,
-            last_reload_unix_ms: 0, // Phase 4
-            last_reload_source: "boot".to_string(),
+            last_reload_unix_ms: self
+                .metrics
+                .last_reload_unix_ms
+                .load(Ordering::Acquire),
+            last_reload_source: (**self.metrics.last_reload_source.load()).to_string(),
             identity_schema_version: herd_scout_identity::SCHEMA_VERSION,
         }
     }
@@ -94,6 +109,9 @@ impl AdminHandler {
             .filter_map(|e| EndpointId::from_str(&e.node_id).ok())
             .collect();
 
+        let allowed_count = new.allowed.len();
+        let admins_count = new.admins.len();
+
         if let Err(e) = write_atomic(&self.config_path, &new) {
             return AdminServerMsg::Error {
                 code: "io".to_string(),
@@ -101,6 +119,19 @@ impl AdminHandler {
             };
         }
         self.cfg.store(Arc::new(new));
+        self.metrics.record_reload("admin_rpc");
+        self.audit
+            .log(
+                "config_reload",
+                None,
+                None,
+                json!({
+                    "source": "admin_rpc",
+                    "allowed_count": allowed_count,
+                    "admins_count": admins_count,
+                }),
+            )
+            .await;
         info!("admin: control.toml rewritten via admin RPC");
         AdminServerMsg::Ok
     }
@@ -184,6 +215,70 @@ impl AdminHandler {
                 self.add_allowed(node_id, label).await
             }
             AdminClientMsg::RemoveAllowed { node_id } => self.remove_allowed(node_id).await,
+            AdminClientMsg::TailAudit {
+                last_n,
+                before_ts_ms,
+            } => {
+                let (records, eof) = self.audit.tail(last_n, before_ts_ms).await;
+                AdminServerMsg::AuditTail { records, eof }
+            }
+        }
+    }
+}
+
+impl AdminHandler {
+    /// Audit the per-RPC outcome, conditioned on the request and the
+    /// daemon's reply. Read-only RPCs (List, Status, TailAudit) are
+    /// not audited — they don't mutate state and can be inferred from
+    /// QUIC connection logs if forensics ever cares.
+    async fn audit_rpc(&self, actor: EndpointId, req: &AdminClientMsg, reply: &AdminServerMsg) {
+        let actor_id = Some(actor.to_string());
+        match (req, reply) {
+            (AdminClientMsg::AddAllowed { node_id, label }, AdminServerMsg::Ok) => {
+                self.audit
+                    .log(
+                        "admin_add_allowed",
+                        actor_id,
+                        None,
+                        json!({
+                            "target_node_id": node_id,
+                            "target_label": label,
+                        }),
+                    )
+                    .await;
+            }
+            (AdminClientMsg::RemoveAllowed { node_id }, AdminServerMsg::Ok) => {
+                self.audit
+                    .log(
+                        "admin_remove_allowed",
+                        actor_id,
+                        None,
+                        json!({ "target_node_id": node_id }),
+                    )
+                    .await;
+            }
+            (
+                AdminClientMsg::AddAllowed { .. } | AdminClientMsg::RemoveAllowed { .. },
+                AdminServerMsg::Error { code, message },
+            ) => {
+                self.audit
+                    .log(
+                        "admin_error",
+                        actor_id,
+                        None,
+                        json!({
+                            "op": match req {
+                                AdminClientMsg::AddAllowed { .. } => "add_allowed",
+                                AdminClientMsg::RemoveAllowed { .. } => "remove_allowed",
+                                _ => "unknown",
+                            },
+                            "code": code,
+                            "message": message,
+                        }),
+                    )
+                    .await;
+            }
+            _ => {}
         }
     }
 }
@@ -200,6 +295,20 @@ impl ProtocolHandler for AdminHandler {
                     remote = %remote.fmt_short(),
                     "admin: dropping unauthorized dial",
                 );
+                self.audit
+                    .log(
+                        "admin_rejected",
+                        Some(remote.to_string()),
+                        None,
+                        json!({
+                            "reason": if remote == self.own_node_id {
+                                "self_dial"
+                            } else {
+                                "not_in_admins"
+                            },
+                        }),
+                    )
+                    .await;
                 return Ok(());
             }
         }
@@ -245,7 +354,8 @@ impl ProtocolHandler for AdminHandler {
             "admin: dispatching",
         );
 
-        let reply = self.dispatch(req).await;
+        let reply = self.dispatch(req.clone()).await;
+        self.audit_rpc(remote, &req, &reply).await;
         let bytes =
             serde_json::to_vec(&reply).expect("AdminServerMsg always serializes");
         if let Err(e) = frame::write_frame(&mut send, &bytes).await {
@@ -270,7 +380,7 @@ mod tests {
     /// Build a handler whose config has one admin and `extras` SSH
     /// allowlist entries. Returns the handler + the path of its
     /// `control.toml` so tests can re-read after mutations.
-    fn fixture(extras: usize) -> (AdminHandler, TempDir, PathBuf) {
+    async fn fixture(extras: usize) -> (AdminHandler, TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("control.toml");
         let admin_id = node_id_from_seed(1);
@@ -292,13 +402,22 @@ mod tests {
         };
         write_atomic(&path, &cfg).unwrap();
         let cfg_swap = Arc::new(ArcSwap::from_pointee(cfg));
-        let handler = AdminHandler::new(cfg_swap, node_id_from_seed(99), path.clone());
+        let audit_dir = tmp.path().join("audit");
+        let audit = Audit::open(audit_dir).await.unwrap();
+        let metrics = ControlMetrics::new();
+        let handler = AdminHandler::new(
+            cfg_swap,
+            node_id_from_seed(99),
+            path.clone(),
+            audit,
+            metrics,
+        );
         (handler, tmp, path)
     }
 
     #[tokio::test]
     async fn add_allowed_persists_and_lists() {
-        let (h, _tmp, path) = fixture(0);
+        let (h, _tmp, path) = fixture(0).await;
         let new = node_id_from_seed(50).to_string();
         let reply = h.add_allowed(new.clone(), "phone".into()).await;
         assert!(matches!(reply, AdminServerMsg::Ok), "got {reply:?}");
@@ -318,7 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_duplicate() {
-        let (h, _tmp, _path) = fixture(0);
+        let (h, _tmp, _path) = fixture(0).await;
         let new = node_id_from_seed(50).to_string();
         let _ = h.add_allowed(new.clone(), "phone".into()).await;
         let reply = h.add_allowed(new, "again".into()).await;
@@ -330,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_missing_label() {
-        let (h, _tmp, _path) = fixture(0);
+        let (h, _tmp, _path) = fixture(0).await;
         let new = node_id_from_seed(50).to_string();
         match h.add_allowed(new, "  ".into()).await {
             AdminServerMsg::Error { code, .. } => assert_eq!(code, "missing_label"),
@@ -340,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_rejects_invalid_node_id() {
-        let (h, _tmp, _path) = fixture(0);
+        let (h, _tmp, _path) = fixture(0).await;
         match h.add_allowed("not-a-node-id".into(), "x".into()).await {
             AdminServerMsg::Error { code, .. } => assert_eq!(code, "invalid_node_id"),
             other => panic!("expected invalid_node_id, got {other:?}"),
@@ -349,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_allowed_drops_entry() {
-        let (h, _tmp, path) = fixture(2);
+        let (h, _tmp, path) = fixture(2).await;
         let target = node_id_from_seed(10).to_string();
         let reply = h.remove_allowed(target.clone()).await;
         assert!(matches!(reply, AdminServerMsg::Ok));
@@ -359,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_rejects_unknown() {
-        let (h, _tmp, _path) = fixture(0);
+        let (h, _tmp, _path) = fixture(0).await;
         let stranger = node_id_from_seed(77).to_string();
         match h.remove_allowed(stranger).await {
             AdminServerMsg::Error { code, .. } => assert_eq!(code, "not_found"),
@@ -374,7 +493,7 @@ mod tests {
     /// inject the empty-admins state through `apply_mutation` itself.
     #[tokio::test]
     async fn no_orphan_guard_rejects_empty_admins() {
-        let (h, _tmp, _path) = fixture(0);
+        let (h, _tmp, _path) = fixture(0).await;
         let reply = h
             .apply_mutation(|cfg| {
                 cfg.admins.clear();
@@ -389,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_returns_correct_counts() {
-        let (h, _tmp, _path) = fixture(3);
+        let (h, _tmp, _path) = fixture(3).await;
         match h.dispatch(AdminClientMsg::Status).await {
             AdminServerMsg::Status(s) => {
                 assert_eq!(s.allowed_count, 3);
@@ -398,6 +517,54 @@ mod tests {
                     s.identity_schema_version,
                     herd_scout_identity::SCHEMA_VERSION
                 );
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_then_tail_audit_returns_record() {
+        let (h, _tmp, _path) = fixture(0).await;
+        let new = node_id_from_seed(50).to_string();
+        h.add_allowed(new.clone(), "phone".into()).await;
+        // The dispatch path is what writes the per-RPC audit. Drive it
+        // through dispatch to mirror real behavior.
+        h.audit_rpc(
+            node_id_from_seed(1),
+            &AdminClientMsg::AddAllowed {
+                node_id: new.clone(),
+                label: "phone".into(),
+            },
+            &AdminServerMsg::Ok,
+        )
+        .await;
+        match h
+            .dispatch(AdminClientMsg::TailAudit {
+                last_n: 10,
+                before_ts_ms: None,
+            })
+            .await
+        {
+            AdminServerMsg::AuditTail { records, .. } => {
+                // The mutation path writes a `config_reload`, the
+                // explicit `audit_rpc` call writes `admin_add_allowed`.
+                let kinds: Vec<_> = records.iter().map(|r| r.kind.as_str()).collect();
+                assert!(kinds.contains(&"admin_add_allowed"), "kinds = {kinds:?}");
+                assert!(kinds.contains(&"config_reload"), "kinds = {kinds:?}");
+            }
+            other => panic!("expected AuditTail, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_reflects_admin_rpc_reload_source() {
+        let (h, _tmp, _path) = fixture(0).await;
+        let new = node_id_from_seed(50).to_string();
+        let _ = h.add_allowed(new, "phone".into()).await;
+        match h.dispatch(AdminClientMsg::Status).await {
+            AdminServerMsg::Status(s) => {
+                assert_eq!(s.last_reload_source, "admin_rpc");
+                assert!(s.last_reload_unix_ms > 0);
             }
             other => panic!("expected Status, got {other:?}"),
         }

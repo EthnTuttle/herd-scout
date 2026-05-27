@@ -72,6 +72,27 @@ pub struct StatusReply {
     pub identity_schema_version: u32,
 }
 
+/// One audit record on the wire. The daemon's on-disk JSONL log is the
+/// source of truth; `TailAudit` returns these to the admin app.
+///
+/// `kind` is a short string identifier (e.g. `"ssh_session_open"`).
+/// `details` is a free-form JSON object holding kind-specific fields
+/// (`target_node_id`, `bytes_to_sshd`, `duration_ms`, …) — the phone
+/// renders unknown kinds as a generic gray-bullet row, which keeps the
+/// wire format forward-compatible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub schema_version: u32,
+    pub ts_ms: u64,
+    pub kind: String,
+    #[serde(default)]
+    pub actor_node_id: Option<String>,
+    #[serde(default)]
+    pub actor_label: Option<String>,
+    #[serde(default)]
+    pub details: serde_json::Value,
+}
+
 /// Wave 12 admin-plane requests (phone → daemon).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -86,6 +107,16 @@ pub enum AdminClientMsg {
     RemoveAllowed { node_id: String },
     /// Snapshot of daemon state for the admin app's status header.
     Status,
+    /// Read up to `last_n` audit records (capped server-side at 500),
+    /// optionally filtering to records strictly older than
+    /// `before_ts_ms`. Used by the admin app's "From daemon" history
+    /// view; pagination = call again with the oldest record's
+    /// `ts_ms` as the next `before_ts_ms`.
+    TailAudit {
+        last_n: u32,
+        #[serde(default)]
+        before_ts_ms: Option<u64>,
+    },
 }
 
 /// Wave 12 admin-plane replies (daemon → phone).
@@ -94,6 +125,7 @@ pub enum AdminClientMsg {
 pub enum AdminServerMsg {
     Allowed { entries: Vec<AllowedEntry> },
     Status(StatusReply),
+    AuditTail { records: Vec<AuditRecord>, eof: bool },
     Ok,
     Error { code: String, message: String },
 }

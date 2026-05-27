@@ -9,17 +9,25 @@
 //! Decisions 1-4 of the plan: one Endpoint, three ALPNs; byte-pump only
 //! (no SSH parsing); allowlist gating with self-dial rejection; cap at
 //! `MAX_SESSIONS` concurrent bridges.
+//!
+//! Wave 12: every gate rejection and every session open/close emits one
+//! line to the daemon's append-only audit log (see `audit.rs`). The
+//! `active_ssh_sessions` counter is shared with the admin handler via
+//! `ControlMetrics` so `Status` can report it accurately.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
+use serde_json::json;
 use tracing::{debug, info, warn};
 
 use super::config::ControlConfig;
+use crate::audit::{Audit, ControlMetrics};
 
 /// Hard ceiling on simultaneous SSH bridges. Decision 4 picks a number
 /// large enough to keep "one user, many tabs" usable but small enough
@@ -30,34 +38,44 @@ const MAX_SESSIONS: usize = 16;
 pub(crate) struct ControlHandler {
     cfg: Arc<ArcSwap<ControlConfig>>,
     own_node_id: EndpointId,
-    sessions: Arc<AtomicUsize>,
+    metrics: Arc<ControlMetrics>,
+    audit: Audit,
 }
 
 impl ControlHandler {
-    pub(crate) fn new(cfg: Arc<ArcSwap<ControlConfig>>, own_node_id: EndpointId) -> Self {
+    pub(crate) fn new(
+        cfg: Arc<ArcSwap<ControlConfig>>,
+        own_node_id: EndpointId,
+        metrics: Arc<ControlMetrics>,
+        audit: Audit,
+    ) -> Self {
         Self {
             cfg,
             own_node_id,
-            sessions: Arc::new(AtomicUsize::new(0)),
+            metrics,
+            audit,
         }
     }
 }
 
-/// RAII guard that decrements the session counter on drop. Used so an
-/// early return / panic / error path can't leak a slot.
+/// RAII guard that decrements the shared `active_ssh_sessions` counter
+/// on drop. Used so an early return / panic / error path can't leak a
+/// slot.
 struct SessionGuard {
-    sessions: Arc<AtomicUsize>,
+    metrics: Arc<ControlMetrics>,
 }
 
 impl SessionGuard {
-    fn new(sessions: Arc<AtomicUsize>) -> Self {
-        Self { sessions }
+    fn new(metrics: Arc<ControlMetrics>) -> Self {
+        Self { metrics }
     }
 }
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
-        self.sessions.fetch_sub(1, Ordering::AcqRel);
+        self.metrics
+            .active_ssh_sessions
+            .fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -73,22 +91,52 @@ impl ProtocolHandler for ControlHandler {
                 remote = %remote.fmt_short(),
                 "control: dropping unauthorized dial",
             );
+            self.audit
+                .log(
+                    "ssh_rejected",
+                    Some(remote.to_string()),
+                    None,
+                    json!({
+                        "reason": if remote == self.own_node_id {
+                            "self_dial"
+                        } else {
+                            "not_in_allowed"
+                        },
+                    }),
+                )
+                .await;
             return Ok(());
         }
 
         // Concurrency cap (Decision 4). fetch_add returns the *previous*
         // value, so we admit when the post-increment count is <= MAX.
-        let prev = self.sessions.fetch_add(1, Ordering::AcqRel);
+        let prev = self
+            .metrics
+            .active_ssh_sessions
+            .fetch_add(1, Ordering::AcqRel);
         if prev >= MAX_SESSIONS {
-            self.sessions.fetch_sub(1, Ordering::AcqRel);
+            self.metrics
+                .active_ssh_sessions
+                .fetch_sub(1, Ordering::AcqRel);
             warn!(
                 remote = %remote.fmt_short(),
                 active = prev,
                 "control: max sessions reached, dropping dial",
             );
+            self.audit
+                .log(
+                    "ssh_rejected",
+                    Some(remote.to_string()),
+                    None,
+                    json!({
+                        "reason": "max_sessions",
+                        "active": prev,
+                    }),
+                )
+                .await;
             return Ok(());
         }
-        let _guard = SessionGuard::new(self.sessions.clone());
+        let _guard = SessionGuard::new(self.metrics.clone());
 
         let ssh_target = cfg.ssh_target;
         drop(cfg);
@@ -98,6 +146,15 @@ impl ProtocolHandler for ControlHandler {
             target = %ssh_target,
             "control: bridging authorized peer to local sshd",
         );
+        self.audit
+            .log(
+                "ssh_session_open",
+                Some(remote.to_string()),
+                None,
+                json!({ "target": ssh_target.to_string() }),
+            )
+            .await;
+        let started = Instant::now();
 
         let (mut send, mut recv) = connection.accept_bi().await.map_err(AcceptError::from_err)?;
 
@@ -109,6 +166,19 @@ impl ProtocolHandler for ControlHandler {
                     target = %ssh_target,
                     "control: connect to sshd failed: {e:#}",
                 );
+                self.audit
+                    .log(
+                        "ssh_session_close",
+                        Some(remote.to_string()),
+                        None,
+                        json!({
+                            "reason": "sshd_connect_failed",
+                            "duration_ms": started.elapsed().as_millis() as u64,
+                            "bytes_to_sshd": 0,
+                            "bytes_from_sshd": 0,
+                        }),
+                    )
+                    .await;
                 return Ok(());
             }
         };
@@ -118,17 +188,47 @@ impl ProtocolHandler for ControlHandler {
             tokio::io::copy(&mut recv, &mut tcp_w),
             tokio::io::copy(&mut tcp_r, &mut send),
         );
+        let duration_ms = started.elapsed().as_millis() as u64;
         match bridge {
-            Ok((up, down)) => debug!(
-                remote = %remote.fmt_short(),
-                client_to_sshd = up,
-                sshd_to_client = down,
-                "control: bridge closed cleanly",
-            ),
-            Err(e) => debug!(
-                remote = %remote.fmt_short(),
-                "control: bridge ended with io error: {e:#}",
-            ),
+            Ok((up, down)) => {
+                debug!(
+                    remote = %remote.fmt_short(),
+                    client_to_sshd = up,
+                    sshd_to_client = down,
+                    "control: bridge closed cleanly",
+                );
+                self.audit
+                    .log(
+                        "ssh_session_close",
+                        Some(remote.to_string()),
+                        None,
+                        json!({
+                            "reason": "clean",
+                            "duration_ms": duration_ms,
+                            "bytes_to_sshd": up,
+                            "bytes_from_sshd": down,
+                        }),
+                    )
+                    .await;
+            }
+            Err(e) => {
+                debug!(
+                    remote = %remote.fmt_short(),
+                    "control: bridge ended with io error: {e:#}",
+                );
+                self.audit
+                    .log(
+                        "ssh_session_close",
+                        Some(remote.to_string()),
+                        None,
+                        json!({
+                            "reason": "io_error",
+                            "error": e.to_string(),
+                            "duration_ms": duration_ms,
+                        }),
+                    )
+                    .await;
+            }
         }
         Ok(())
     }

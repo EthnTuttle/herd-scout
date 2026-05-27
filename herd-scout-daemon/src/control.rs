@@ -16,11 +16,22 @@ pub(crate) use handler::ControlHandler;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
+use crate::audit::{Audit, ControlMetrics};
+
 /// Spawn the SIGHUP-reload task. Drops `Arc` clones on shutdown.
-pub(crate) fn spawn_sighup_reloader(cfg: Arc<ArcSwap<ControlConfig>>) {
+///
+/// Wave 12: each successful reload also stamps `ControlMetrics` and
+/// emits a `config_reload` audit record so `Status` and the History
+/// tab can surface "operator hand-edited at HH:MM."
+pub(crate) fn spawn_sighup_reloader(
+    cfg: Arc<ArcSwap<ControlConfig>>,
+    metrics: Arc<ControlMetrics>,
+    audit: Audit,
+) {
     tokio::spawn(async move {
         let mut sighup = match signal(SignalKind::hangup()) {
             Ok(s) => s,
@@ -33,12 +44,27 @@ pub(crate) fn spawn_sighup_reloader(cfg: Arc<ArcSwap<ControlConfig>>) {
         while sighup.recv().await.is_some() {
             match load_or_default(&path) {
                 Ok(new) => {
+                    let allowed = new.allowed.len();
+                    let admins = new.admins.len();
                     info!(
-                        allowed = new.allowed_node_ids.len(),
-                        admins = new.admins.len(),
+                        allowed,
+                        admins,
                         "control: reload OK",
                     );
                     cfg.store(Arc::new(new));
+                    metrics.record_reload("sighup");
+                    audit
+                        .log(
+                            "config_reload",
+                            None,
+                            None,
+                            json!({
+                                "source": "sighup",
+                                "allowed_count": allowed,
+                                "admins_count": admins,
+                            }),
+                        )
+                        .await;
                 }
                 Err(e) => warn!("control: reload failed (keeping previous): {e:#}"),
             }
