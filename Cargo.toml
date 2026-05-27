@@ -2,8 +2,10 @@
 members = [
     "herd-scout-daemon",
     "herd-scout-gui",
+    "herd-scout-identity",
     "herd-scout-ipc",
     "android-jni",
+    "herdctl",
     # iroh-live
     "vendor/iroh-live/iroh-live",
     "vendor/iroh-live/iroh-live-relay",

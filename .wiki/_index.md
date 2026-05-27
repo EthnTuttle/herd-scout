@@ -57,3 +57,6 @@
 - [[output/playbook-herd-scout-2026-05-20]] — strategic playbook
 - [[output/plan-mobile-to-desktop-iroh-rfc-2026-05-20]] — RFC for the mobile-to-desktop iroh app MVP
 - [[output/plan-deploy-daemon-on-1060-laptop-2026-05-22]] — roadmap for deploying the daemon on the GTX 1060 GS63VR laptop (headless Ubuntu, ort+CUDA, systemd)
+- [[output/plan-optimize-cv-sidecar-trt-yolo11s-2026-05-26]] — roadmap for optimizing the CV sidecar (YOLO11s + embedded NMS, supervision/ByteTrack, TRT 8.6 EFFICIENT_NMS gated)
+- [[output/plan-iroh-bound-ssh-access-daemon-2026-05-26]] — roadmap for iroh-bound SSH access to the daemon (third ALPN on the existing Live router, NodeId allowlist, `herdctl proxy` as ssh ProxyCommand — replaces the SSH UDS forward from the deploy plan)
+- [[output/plan-android-admin-allowlist-app-2026-05-27]] — roadmap for an Android admin APK that manages the daemon's permitted NodeIDs over a fourth ALPN `herd-scout/admin/1` (separate `[control_plane.admins]` allowlist, atomic `control.toml` rewrites, append-only audit log on both ends + `TailAudit` RPC, single-slot fleet switcher, versioned `identity.toml` envelope shared by daemon/herdctl/phone for backup/restore, dedicated `com.herdscout.admin` build flavor)

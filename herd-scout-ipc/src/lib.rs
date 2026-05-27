@@ -18,6 +18,86 @@
 
 use serde::{Deserialize, Serialize};
 
+/// ALPN for the daemon's control plane (Wave 11).
+///
+/// Registered as a third protocol on the daemon's iroh `Router` alongside
+/// `iroh_moq::ALPN` and `iroh_gossip::ALPN`. The daemon accepts
+/// bi-directional QUIC streams on this ALPN, gates on a NodeId allowlist,
+/// then byte-pumps the stream into local sshd. Clients (`herdctl proxy`)
+/// dial this ALPN and pipe stdin/stdout, designed for use as an OpenSSH
+/// `ProxyCommand`.
+///
+/// Versioned: future framing changes get `herd-scout/ssh/2` and old daemons
+/// keep accepting v1 for one release.
+pub const CONTROL_ALPN: &[u8] = b"herd-scout/ssh/1";
+
+/// ALPN for the daemon's admin RPC plane (Wave 12).
+///
+/// A fourth ALPN registered on the daemon's iroh `Router`. Authorized
+/// peers (entries in `[control_plane.admins]`) open a bi-directional
+/// QUIC stream and send a length-prefixed JSON [`AdminClientMsg`]; the
+/// daemon replies with one [`AdminServerMsg`] then closes. One RPC per
+/// stream.
+///
+/// Versioned the same way `CONTROL_ALPN` is. v1 framing: 4-byte
+/// big-endian length + JSON body, single round-trip per stream.
+pub const ADMIN_ALPN: &[u8] = b"herd-scout/admin/1";
+
+/// One entry in the daemon's SSH allowlist. `node_id` is a canonical
+/// `EndpointId` string; `label` is human-readable and may be empty
+/// (legacy entries that pre-date the labeled-schema migration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowedEntry {
+    pub node_id: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// Reply payload for `AdminClientMsg::Status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusReply {
+    pub daemon_version: String,
+    pub own_node_id: String,
+    pub active_ssh_sessions: u32,
+    pub admins_count: u32,
+    pub allowed_count: u32,
+    /// Wall-clock timestamp of the last successful config swap (boot,
+    /// SIGHUP, or admin RPC). Milliseconds since UNIX epoch.
+    pub last_reload_unix_ms: u64,
+    /// Source of the last reload: `"boot"`, `"sighup"`, or `"admin_rpc"`.
+    pub last_reload_source: String,
+    /// `herd-scout-identity` envelope schema version the daemon was
+    /// built against. Useful for the phone client to surface "your
+    /// daemon understands schema N."
+    pub identity_schema_version: u32,
+}
+
+/// Wave 12 admin-plane requests (phone → daemon).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdminClientMsg {
+    /// Return the current SSH allowlist.
+    ListAllowed,
+    /// Add a new entry to the SSH allowlist. `node_id` must parse as a
+    /// canonical `EndpointId`; `label` is required (cannot be empty).
+    AddAllowed { node_id: String, label: String },
+    /// Remove an entry by `node_id`. No-op if not present (returns
+    /// `Error { code: "not_found" }`).
+    RemoveAllowed { node_id: String },
+    /// Snapshot of daemon state for the admin app's status header.
+    Status,
+}
+
+/// Wave 12 admin-plane replies (daemon → phone).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdminServerMsg {
+    Allowed { entries: Vec<AllowedEntry> },
+    Status(StatusReply),
+    Ok,
+    Error { code: String, message: String },
+}
+
 /// Mirror of the daemon's connection-status state machine. This used to
 /// live in `desktop/src/stream.rs`; the GUI now sees only the
 /// daemon-reported value.
@@ -69,6 +149,10 @@ pub struct DetWire {
     /// `[x1, y1, x2, y2]` in source-frame pixel space.
     pub bbox: [f32; 4],
     pub score: f32,
+    /// Persistent ByteTrack id for this detection across frames.
+    /// `None` when the tracker has not yet attached an ID.
+    #[serde(default)]
+    pub track_id: Option<u32>,
 }
 
 impl DetWire {
@@ -298,6 +382,64 @@ mod tests {
         let parsed: ClientMsg = serde_json::from_str(&s).unwrap();
         match parsed {
             ClientMsg::ConnectTicket { ticket } => assert_eq!(ticket, "iroh-live:abc"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn admin_client_msg_roundtrips() {
+        let cases = [
+            AdminClientMsg::ListAllowed,
+            AdminClientMsg::Status,
+            AdminClientMsg::AddAllowed {
+                node_id: "abc".into(),
+                label: "phone".into(),
+            },
+            AdminClientMsg::RemoveAllowed {
+                node_id: "abc".into(),
+            },
+        ];
+        for msg in cases {
+            let s = serde_json::to_string(&msg).unwrap();
+            let parsed: AdminClientMsg = serde_json::from_str(&s).unwrap();
+            // shallow comparison via Debug
+            assert_eq!(format!("{msg:?}"), format!("{parsed:?}"));
+        }
+    }
+
+    #[test]
+    fn admin_server_msg_roundtrips() {
+        let entries = vec![AllowedEntry {
+            node_id: "abc".into(),
+            label: "phone".into(),
+        }];
+        let s = serde_json::to_string(&AdminServerMsg::Allowed { entries }).unwrap();
+        match serde_json::from_str::<AdminServerMsg>(&s).unwrap() {
+            AdminServerMsg::Allowed { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].node_id, "abc");
+                assert_eq!(entries[0].label, "phone");
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let status = StatusReply {
+            daemon_version: "0.1.0".into(),
+            own_node_id: "xyz".into(),
+            active_ssh_sessions: 2,
+            admins_count: 1,
+            allowed_count: 3,
+            last_reload_unix_ms: 1717000000000,
+            last_reload_source: "boot".into(),
+            identity_schema_version: 1,
+        };
+        let s = serde_json::to_string(&AdminServerMsg::Status(status)).unwrap();
+        match serde_json::from_str::<AdminServerMsg>(&s).unwrap() {
+            AdminServerMsg::Status(r) => {
+                assert_eq!(r.daemon_version, "0.1.0");
+                assert_eq!(r.active_ssh_sessions, 2);
+                assert_eq!(r.last_reload_source, "boot");
+            }
             _ => panic!("wrong variant"),
         }
     }

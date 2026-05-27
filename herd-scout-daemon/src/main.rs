@@ -22,6 +22,9 @@
 // `cv` is declared in `lib.rs` so it can be reached by `examples/cv-probe.rs`.
 // Everything else stays bin-private.
 use herd_scout_daemon::cv;
+mod admin;
+mod control;
+mod daemon_secret;
 mod ipc;
 mod pairing;
 mod preview;
@@ -52,6 +55,14 @@ async fn main() -> Result<()> {
 
     info!("herd-scout-daemon v{} starting", env!("CARGO_PKG_VERSION"));
 
+    // Persist the iroh secret so the daemon's NodeId is stable across
+    // restarts. Operators paste it into `~/.ssh/config` HostName and
+    // peers' control.toml allowlists; rotating it on every restart
+    // would break those references silently.
+    if let Err(e) = daemon_secret::ensure_iroh_secret_persisted() {
+        warn!("could not persist iroh secret (NodeId may rotate on restart): {e:#}");
+    }
+
     // Open the prefs store; non-fatal if it fails.
     let store = match store::Store::open().await {
         Ok(s) => Some(Arc::new(s)),
@@ -61,16 +72,48 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Bring up the Live endpoint. `with_router()` so phones can dial in;
-    // `with_gossip()` for parity with the JNI publisher and to enable
-    // future room-based discovery.
+    // Bring up the Live endpoint. We hand-build the iroh `Router`
+    // ourselves (NOT `with_router()`) so we can mount the Wave 11
+    // control-plane ALPN alongside moq + gossip on a single Endpoint.
     let live = Live::from_env()
         .await
         .map_err(|e| anyhow::anyhow!("Live::from_env failed: {e}"))?
-        .with_router()
         .with_gossip()
         .spawn();
-    info!(id = %live.endpoint().id().fmt_short(), "iroh endpoint bound");
+    let endpoint = live.endpoint().clone();
+    let own_node_id = endpoint.id();
+
+    // Wave 11 control plane: load `control.toml` (fail-closed), spawn a
+    // SIGHUP-triggered reloader, build the handler.
+    let control_cfg = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        control::load_or_default(&control::config_path()).unwrap_or_else(|e| {
+            warn!("control: bad config at startup, closing control plane: {e:#}");
+            control::ControlConfig::default()
+        }),
+    ));
+    control::spawn_sighup_reloader(control_cfg.clone());
+    let control_handler = control::ControlHandler::new(control_cfg.clone(), own_node_id);
+    let admin_handler = admin::AdminHandler::new(
+        control_cfg.clone(),
+        own_node_id,
+        control::config_path(),
+    );
+
+    // Mount moq + gossip via Live::register_protocols, then add our
+    // SSH-bridge ALPN (Wave 11) and the admin RPC ALPN (Wave 12). The
+    // Router is kept alive for the lifetime of `main` — dropping it
+    // aborts the accept loop.
+    let router = live
+        .register_protocols(iroh::protocol::Router::builder(endpoint))
+        .accept(herd_scout_ipc::CONTROL_ALPN, control_handler)
+        .accept(herd_scout_ipc::ADMIN_ALPN, admin_handler)
+        .spawn();
+    info!(
+        id = %live.endpoint().id().fmt_short(),
+        allowed = control_cfg.load().allowed_node_ids.len(),
+        admins = control_cfg.load().admins.len(),
+        "iroh endpoint bound, control plane up",
+    );
 
     let (broadcast_name, ticket) =
         resolve_ticket(&live, store.as_deref(), cli_ticket).await?;
@@ -243,6 +286,12 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Wave 11: shut the hand-built router (and its accept loop) before
+    // closing the endpoint via `live.shutdown()`. Shutting the router
+    // down first lets in-flight control-plane bridges drain.
+    if let Err(err) = router.shutdown().await {
+        warn!("error while shutting down iroh router: {err:#}");
+    }
     live.shutdown().await;
     Ok(())
 }

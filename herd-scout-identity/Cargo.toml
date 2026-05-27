@@ -1,0 +1,21 @@
+[package]
+name = "herd-scout-identity"
+version = "0.1.0"
+edition = "2021"
+description = "Versioned iroh-identity envelope shared by herd-scout-daemon, herdctl, and herd-scout-jni"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+iroh = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

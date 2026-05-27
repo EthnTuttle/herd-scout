@@ -1,0 +1,19 @@
+[package]
+name = "herdctl"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "herdctl"
+path = "src/main.rs"
+
+[dependencies]
+iroh = { workspace = true }
+herd-scout-ipc = { path = "../herd-scout-ipc" }
+herd-scout-identity = { path = "../herd-scout-identity" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "sync", "time"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "5"
