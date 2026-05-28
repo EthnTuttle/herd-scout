@@ -128,6 +128,8 @@ Covers Allflex/Agrident/Tru-Test SPP and most Nordic-UART BLE readers — ~70-80
 - [[iroh-sync-stack]]
 - [[ag-data-standards]]
 - [[herd-scout-positioning]]
+- [[herd-counting-pipeline]] — EID-known animals as marks for Lincoln-Petersen / N-mixture calibration of the CV count
+- [[count-validation-conformal]] — three-tier validation: EID-reconciled is the green-chip case
 
 ## Sources
 - raw: [[2026-05-20-aggateway-adapt]]

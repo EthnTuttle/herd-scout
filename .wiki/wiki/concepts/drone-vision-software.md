@@ -142,6 +142,8 @@ Create an open source vision software tool that can:
 
 ## See also
 
+- [[herd-counting-pipeline]] — how detector output becomes an accurate, calibrated count
+- [[livestock-cv-accuracy]] — realistic precision / recall / MAE numbers from the literature
 - [[oss-drone-fms-pipeline]] — where this fits in the broader pipeline (L6 real-time inference layer)
 - [[precision-ag-drone-use-cases]] — adjacent use cases worth roadmap consideration
 - [[herdnet-livestock-cv]] — alternative aerial livestock detection model

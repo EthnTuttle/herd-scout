@@ -16,11 +16,11 @@
 - Computer vision for livestock counting + fenceline + thermal
 
 ## Sources
-- 17 ingested sources — see [[raw/_index]]
+- 28 ingested sources — see [[raw/_index]]
 
 ## Articles
 
-### Concepts (17)
+### Concepts (19)
 
 **Strategy / synthesis**
 - [[concepts/herd-scout-positioning]] — defensible wedges and what to build
@@ -38,6 +38,10 @@
 - [[concepts/iroh-sync-stack]] — iroh-docs + iroh-blobs + iroh-gossip
 - [[concepts/iroh-docs-fms-schema]] — concrete key layout + code sketch
 
+**Computer vision / counting**
+- [[concepts/herd-counting-pipeline]] — 5-layer pipeline: detection → tracking → counting → aggregation → validation
+- [[concepts/livestock-cv-accuracy]] — realistic precision / recall / MAE numbers + altitude band
+
 **Drone**
 - [[concepts/drone-vision-software]] — YOLO, OpenDataCam, video streaming
 - [[concepts/drone-hardware]] — ArduPilot, phone as camera, Jetson
@@ -50,7 +54,8 @@
 ## Status
 - Round 1 complete (8 parallel agents, 14 sources, 12 new articles)
 - Round 2 complete (3 focused agents on top gaps, 3 sources, 2 new articles + 2 articles enriched)
-- Total: 17 sources, 14 concept articles + 3 pre-existing articles cross-linked
+- Round 3 complete (8 parallel agents on accurate-herd-counting question, 11 sources, 2 new concept articles + cross-links)
+- Total: 28 sources, 16 concept articles + 3 pre-existing articles cross-linked
 
 ## Outputs
 
@@ -60,3 +65,5 @@
 - [[output/plan-optimize-cv-sidecar-trt-yolo11s-2026-05-26]] — roadmap for optimizing the CV sidecar (YOLO11s + embedded NMS, supervision/ByteTrack, TRT 8.6 EFFICIENT_NMS gated)
 - [[output/plan-iroh-bound-ssh-access-daemon-2026-05-26]] — roadmap for iroh-bound SSH access to the daemon (third ALPN on the existing Live router, NodeId allowlist, `herdctl proxy` as ssh ProxyCommand — replaces the SSH UDS forward from the deploy plan)
 - [[output/plan-android-admin-allowlist-app-2026-05-27]] — roadmap for an Android admin APK that manages the daemon's permitted NodeIDs over a fourth ALPN `herd-scout/admin/1` (separate `[control_plane.admins]` allowlist, atomic `control.toml` rewrites, append-only audit log on both ends + `TailAudit` RPC, single-slot fleet switcher, versioned `identity.toml` envelope shared by daemon/herdctl/phone for backup/restore, dedicated `com.herdscout.admin` build flavor)
+- [[output/playbook-accurate-herd-counting-2026-05-27]] — playbook for accurate herd counting from CV detections (5-layer pipeline: detection → tracking → counting → aggregation → validation; EID reconciliation as the differentiator)
+- [[output/plan-desktop-video-upload-2026-05-28]] — roadmap for desktop video upload to daemon (fifth ALPN `herd-scout/upload/1` over iroh-blobs, sidecar file-decode mode, single-clip queue behind live phone, per-clip JSON report applying the accurate-counting playbook, GUI drag-drop + `herdctl push`)

@@ -91,6 +91,8 @@ Key novelty vs the hub wiki's existing plan: (a) we use **iroh's transport direc
 
 ### Decision 6 — GUI connects via SSH tunnel to the daemon's UDS
 
+> **Wave 11 update (2026-05-27)**: this decision still stands as written, but the *transport* underneath has been replaced. The deploy plan assumed an `ssh -L ...` tunnel to a hostname/IP on the laptop, which required DNS or port-forwarding. Wave 11 ships an iroh-bound SSH path (`herdctl proxy <NodeId>` as `ssh -o ProxyCommand`) so the same `ssh -L` command works without any IP-layer config — the host is an iroh `EndpointId`, not a hostname. The GUI flow at the bottom of this decision (`HERD_SCOUT_SOCKET=/tmp/herd-scout.sock cargo run -p herd-scout-gui`) is unchanged. See [[plan-iroh-bound-ssh-access-daemon-2026-05-26]] and `deploy/README.md` for the operator quickstart.
+
 **Context**: The user picked "daemon-only, headless service — GUI runs on a different machine." The daemon's IPC is a **Unix domain socket** at `~/.local/share/herd-scout/daemon.sock` (per `[[daemon-split-design]]` § IPC protocol). To reach it from a remote GUI:
 
 - SSH `LocalForward` of the UDS: `ssh -L /tmp/herd-scout.sock:/home/<user>/.local/share/herd-scout/daemon.sock <laptop>` (OpenSSH 8.0+ supports UDS forwarding directly)
