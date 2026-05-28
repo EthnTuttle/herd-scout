@@ -1,4 +1,4 @@
-package com.herdscout.app
+package com.herdscout.shared
 
 import android.content.Context
 import android.graphics.Canvas

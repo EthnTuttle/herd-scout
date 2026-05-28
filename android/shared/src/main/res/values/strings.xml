@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shared: QR scan flow used by both the streaming app and the
+         admin app. Keep these here so the resource ids resolve from
+         either consumer. -->
+    <string name="qr_scan_title">Scan QR</string>
+    <string name="qr_hint">Point at the desktop\'s QR code</string>
+    <string name="qr_hint_low_light">Low light? Tap the torch button to help the scanner.</string>
+    <string name="qr_torch_on">Torch ON</string>
+    <string name="qr_torch_off">Torch OFF</string>
+</resources>

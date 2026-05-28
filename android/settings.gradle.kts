@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "herd-scout"
-include(":app")
+include(":app", ":shared", ":admin")

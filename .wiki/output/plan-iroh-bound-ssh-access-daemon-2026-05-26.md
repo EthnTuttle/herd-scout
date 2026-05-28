@@ -227,6 +227,8 @@ Both `scp file.bin herd-scout-laptop:~/` and `ssh -L /tmp/herd-scout.sock:/home/
 
 ### Phase 5 — Operator docs, defaults, and a one-shot installer (estimated effort: 0.5 day)
 
+> **Forward pointer**: Wave 12 (`plan-android-admin-allowlist-app-2026-05-27`) adds an Android admin app over a fourth ALPN, atomic config rewrites, an append-only audit log, and a portable identity backup format. Once that ships, allowlist mutations come from the phone and `control.toml` becomes machine-managed. The hand-edit + SIGHUP path documented in this phase remains as the bootstrap path and the lock-out fallback.
+
 **Goal**: `deploy/README.md` shows a copy-paste flow that takes a fresh laptop from "daemon installed" to "GUI running on dev Mac" without any IP-layer config.
 
 **Tasks**:

@@ -16,7 +16,7 @@
          [QrViewfinderOverlay.kt] as a custom View that draws four
          corner brackets around the focus rect over a translucent dim
          background. Wave 5A polish. -->
-    <com.herdscout.app.QrViewfinderOverlay
+    <com.herdscout.shared.QrViewfinderOverlay
         android:id="@+id/qrViewfinder"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />

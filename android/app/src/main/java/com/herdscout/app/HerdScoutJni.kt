@@ -1,5 +1,7 @@
 package com.herdscout.app
 
+import com.herdscout.shared.HerdScoutJniLoader
+
 /**
  * Kotlin facade over the Rust JNI library.
  *
@@ -16,7 +18,7 @@ package com.herdscout.app
  */
 object HerdScoutJni {
     init {
-        System.loadLibrary("herd_scout_jni")
+        HerdScoutJniLoader.ensureLoaded()
     }
 
     fun connectWithTicket(ticket: String): Long = nativeConnectWithTicket(ticket)

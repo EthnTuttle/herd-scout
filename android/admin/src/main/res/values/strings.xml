@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="admin_app_name">herd-scout admin</string>
+
+    <!-- Top-level navigation -->
+    <string name="tab_allowlist">Allowlist</string>
+    <string name="tab_history">History</string>
+    <string name="tab_identity">My Identity</string>
+    <string name="history_subtab_local">From this device</string>
+    <string name="history_subtab_daemon">From daemon</string>
+
+    <!-- Daemon switcher -->
+    <string name="no_daemon_selected">No daemon</string>
+    <string name="add_daemon">Add daemon…</string>
+    <string name="add_daemon_title">Add daemon</string>
+    <string name="add_daemon_label_hint">Label (e.g. "Pasture laptop")</string>
+    <string name="add_daemon_node_id_hint">Daemon NodeId (paste or scan)</string>
+    <string name="action_save">Save</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_scan_qr">Scan QR</string>
+    <string name="action_paste">Paste</string>
+
+    <!-- Status header -->
+    <string name="status_unknown">Status unavailable</string>
+    <string name="status_format">%1$d admins · %2$d allowed · %3$d sessions · last reload %4$s</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting…</string>
+
+    <!-- Allowlist tab -->
+    <string name="add_allowed_title">Add allowed device</string>
+    <string name="add_allowed_label_hint">Label (required)</string>
+    <string name="add_allowed_node_id_hint">Device NodeId</string>
+    <string name="confirm_remove_title">Remove device?</string>
+    <string name="confirm_remove_message">This device will lose SSH access immediately.</string>
+    <string name="action_remove">Remove</string>
+
+    <!-- Identity tab -->
+    <string name="my_identity_title">My identity</string>
+    <string name="my_identity_blurb">Anyone with this NodeId in the daemon\'s admins list can manage the SSH allowlist.</string>
+    <string name="action_export_identity">Export identity…</string>
+    <string name="action_import_identity">Import identity…</string>
+    <string name="export_warning_title">Keep this file safe</string>
+    <string name="export_warning_message">Anyone who has this file can act as you on the daemon. Treat it like an SSH private key.</string>
+    <string name="import_replace_title">Replace identity?</string>
+    <string name="import_replace_message">This will sign you out of every daemon. You\'ll reconnect with the imported NodeId.</string>
+
+    <!-- Errors -->
+    <string name="rpc_failed">Operation failed</string>
+    <string name="would_orphan_message">Cannot remove the last admin device. Add another admin first.</string>
+</resources>

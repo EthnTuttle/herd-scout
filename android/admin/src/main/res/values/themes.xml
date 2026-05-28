@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose handles its own theming via [AdminTheme.kt]; this base
+         AppCompat theme just exists so AGP doesn't complain about the
+         activity's `android:theme` reference. -->
+    <style name="Theme.HerdScoutAdmin" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@color/admin_charcoal</item>
+        <item name="android:navigationBarColor">@color/admin_charcoal</item>
+    </style>
+</resources>

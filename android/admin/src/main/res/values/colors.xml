@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Wave 12 admin app palette: orange-on-charcoal so the launcher
+         icon and chrome are visually distinct from the streaming app. -->
+    <color name="admin_orange">#FF7A1A</color>
+    <color name="admin_orange_container">#FFE0CC</color>
+    <color name="admin_charcoal">#1A1A1A</color>
+    <color name="admin_charcoal_container">#2C2C2C</color>
+    <color name="admin_on_charcoal">#F5F5F5</color>
+</resources>
