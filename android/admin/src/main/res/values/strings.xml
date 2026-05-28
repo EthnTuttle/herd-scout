@@ -47,4 +47,5 @@
     <!-- Errors -->
     <string name="rpc_failed">Operation failed</string>
     <string name="would_orphan_message">Cannot remove the last admin device. Add another admin first.</string>
+    <string name="camera_permission_required">Camera permission is required to scan QR codes.</string>
 </resources>

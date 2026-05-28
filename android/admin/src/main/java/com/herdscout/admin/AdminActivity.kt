@@ -1,7 +1,9 @@
 package com.herdscout.admin
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -10,6 +12,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -270,13 +273,43 @@ private fun DaemonSwitcherSheet(
     }
 }
 
+/**
+ * Returns a launch lambda that opens [QrScanActivity], requesting the
+ * runtime CAMERA permission first if it hasn't been granted. Without this
+ * gate the camera-bind inside the scanner throws SecurityException and
+ * crashes the activity.
+ */
+@Composable
+private fun rememberQrScanWithPermission(onResult: (String) -> Unit): () -> Unit {
+    val ctx = LocalContext.current
+    val scanLauncher = rememberLauncherForActivityResult(QrScanActivity.Companion.Contract()) {
+        if (!it.isNullOrBlank()) onResult(it.trim())
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            scanLauncher.launch(Unit)
+        } else {
+            Toast.makeText(ctx, ctx.getString(R.string.camera_permission_required), Toast.LENGTH_LONG).show()
+        }
+    }
+    return {
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            scanLauncher.launch(Unit)
+        } else {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+}
+
 @Composable
 private fun AddDaemonDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
     var label by remember { mutableStateOf("") }
     var nodeId by remember { mutableStateOf("") }
-    val scanLauncher = rememberLauncherForActivityResult(QrScanActivity.Companion.Contract()) {
-        if (!it.isNullOrBlank()) nodeId = it.trim()
-    }
+    val launchScan = rememberQrScanWithPermission { nodeId = it }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.add_daemon_title)) },
@@ -297,7 +330,7 @@ private fun AddDaemonDialog(onDismiss: () -> Unit, onSave: (String, String) -> U
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                 )
                 Spacer(Modifier.height(8.dp))
-                TextButton(onClick = { scanLauncher.launch(Unit) }) {
+                TextButton(onClick = { launchScan() }) {
                     Text(stringResource(R.string.action_scan_qr))
                 }
             }
@@ -457,9 +490,7 @@ private fun AddAllowedDialog(
 ) {
     var nodeId by remember { mutableStateOf("") }
     var label by remember { mutableStateOf("") }
-    val scanLauncher = rememberLauncherForActivityResult(QrScanActivity.Companion.Contract()) {
-        if (!it.isNullOrBlank()) nodeId = it.trim()
-    }
+    val launchScan = rememberQrScanWithPermission { nodeId = it }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.add_allowed_title)) },
@@ -478,7 +509,7 @@ private fun AddAllowedDialog(
                     label = { Text(stringResource(R.string.add_allowed_node_id_hint)) },
                 )
                 Spacer(Modifier.height(8.dp))
-                TextButton(onClick = { scanLauncher.launch(Unit) }) {
+                TextButton(onClick = { launchScan() }) {
                     Text(stringResource(R.string.action_scan_qr))
                 }
             }
