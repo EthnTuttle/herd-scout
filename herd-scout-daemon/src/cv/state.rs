@@ -156,6 +156,7 @@ mod tests {
             class: CocoClass::Cow,
             bbox: [0.0, 0.0, 10.0, 10.0],
             score,
+            track_id: None,
         }
     }
 

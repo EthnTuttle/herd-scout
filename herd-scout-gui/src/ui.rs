@@ -10,18 +10,33 @@
 //!     overlay, the frame-age stamp, and the reconnect overlay when
 //!     frames are stale or the connection drops.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use herd_scout_ipc::{ClientMsg, ConnectionStatus};
+use herd_scout_ipc::{ClientMsg, ConnectionStatus, UploadState};
+use tokio::sync::mpsc;
 
 use crate::frame_view::FrameView;
 use crate::ipc::client::{IpcClientHandle, SharedClientState};
 use crate::overlay;
 use crate::pairing;
+use crate::uploads::{self, UploadRow};
 
 const RECONNECT_STALE_AFTER: Duration = Duration::from_secs(2);
+
+/// Phase 5: hard cap mirrored from the daemon (`plan-desktop-video-upload`).
+/// Reject obviously-too-big files in the GUI without contacting the daemon.
+const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Accepted video file extensions for drag-drop. The daemon will do its own
+/// codec probe — this is just a fast client-side reject for obviously-wrong
+/// drops.
+const ACCEPTED_EXTS: &[&str] = &["mp4", "mov", "m4v"];
+
+/// How long to keep a transient upload-banner message visible before fading.
+const UPLOAD_BANNER_TTL: Duration = Duration::from_secs(6);
 
 /// Small ASCII-art glyph rendered in the bottom HUD. Two-eyed cow head;
 /// monospace, four lines tall. Kept short so the HUD stays compact even
@@ -58,6 +73,10 @@ pub struct App {
     last_counted_pts_ms: Option<u64>,
     /// Wall-clock start of the GUI process, for the HUD uptime counter.
     start_instant: Instant,
+    /// Phase 5: transient upload banner (e.g. "rejected: too large").
+    /// `None` clears it; populated rows fade out after
+    /// [`UPLOAD_BANNER_TTL`].
+    upload_banner: Option<(String, Instant)>,
 }
 
 impl App {
@@ -77,7 +96,152 @@ impl App {
             bytes_rx: 0,
             last_counted_pts_ms: None,
             start_instant: Instant::now(),
+            upload_banner: None,
         }
+    }
+
+    /// Validate then route a dropped or picked video file through the
+    /// upload pipeline. Validation is purely client-side and cheap; on
+    /// success we spawn a worker thread that BLAKE3-hashes the file
+    /// off the egui paint thread, registers a local-pending row, and
+    /// hands the file off to the daemon.
+    fn handle_dropped_video(&mut self, path: PathBuf) {
+        let path_str = path.display().to_string();
+        match validate_video_path(&path) {
+            Ok(size_bytes) => {
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_str.clone());
+                self.set_upload_banner(format!("hashing {filename}…"));
+                let uploads_state = self.state.uploads.clone();
+                let send = self.handle.send.clone();
+                std::thread::spawn(move || {
+                    spawn_hash_and_handoff(
+                        path,
+                        filename,
+                        size_bytes,
+                        uploads_state,
+                        send,
+                    );
+                });
+            }
+            Err(reason) => {
+                tracing::warn!(path = %path_str, "GUI: rejected drop: {reason}");
+                self.set_upload_banner(format!("rejected {path_str}: {reason}"));
+            }
+        }
+    }
+
+    fn set_upload_banner(&mut self, msg: String) {
+        self.upload_banner = Some((msg, Instant::now()));
+    }
+
+    /// Spawn a native file picker. The dialog runs synchronously on a
+    /// worker thread to keep the egui paint loop unblocked; on macOS
+    /// `rfd` is happy from a background thread, which is the only OS
+    /// committed to in this phase.
+    ///
+    /// Platform support: `rfd::FileDialog::pick_file()` running on a
+    /// `std::thread::spawn` worker is validated only on macOS for v1.
+    /// Linux and Windows are expected to work but are untested — validate
+    /// before shipping non-macOS builds. If those platforms misbehave,
+    /// fall back to a synchronous call from the egui thread (a few
+    /// seconds of UI block during file selection is acceptable).
+    fn open_file_picker(&mut self) {
+        let uploads_state = self.state.uploads.clone();
+        let send = self.handle.send.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .add_filter("video", &["mp4", "mov", "m4v"])
+                .set_title("Pick a video to upload")
+                .pick_file();
+            let Some(path) = picked else { return };
+            // Re-run validation inside the worker — same checks as drag-drop.
+            let size_bytes = match validate_video_path(&path) {
+                Ok(n) => n,
+                Err(reason) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "GUI: file picker rejected: {reason}"
+                    );
+                    return;
+                }
+            };
+            let filename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            spawn_hash_and_handoff(path, filename, size_bytes, uploads_state, send);
+        });
+    }
+
+    /// Render the right-side "Uploads" panel.
+    fn draw_uploads_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("uploads_panel")
+            .resizable(true)
+            .default_width(280.0)
+            .min_width(220.0)
+            .show(ctx, |ui| {
+                ui.add_space(6.0);
+                ui.heading("Uploads");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Drop an MP4/MOV here · or press Cmd/Ctrl+O",
+                    )
+                    .color(egui::Color32::GRAY)
+                    .size(11.0),
+                );
+                ui.separator();
+
+                if let Some((msg, at)) = self.upload_banner.clone() {
+                    if at.elapsed() < UPLOAD_BANNER_TTL {
+                        ui.colored_label(egui::Color32::LIGHT_RED, &msg);
+                        ui.separator();
+                    } else {
+                        self.upload_banner = None;
+                    }
+                }
+
+                let snap = self.state.uploads.snapshot();
+                if snap.is_empty() {
+                    ui.add_space(12.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("(no uploads yet)")
+                                .color(egui::Color32::DARK_GRAY)
+                                .size(12.0),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Drag a clip onto the window to queue it.",
+                            )
+                            .color(egui::Color32::DARK_GRAY)
+                            .size(11.0),
+                        );
+                    });
+                    return;
+                }
+
+                let mut to_cancel: Option<String> = None;
+                let mut to_remove: Option<String> = None;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for row in &snap {
+                        ui.add_space(4.0);
+                        draw_upload_row(ui, row, &mut to_cancel, &mut to_remove);
+                        ui.separator();
+                    }
+                });
+                if let Some(hex) = to_cancel {
+                    self.handle
+                        .try_send(ClientMsg::UploadCancel { blake3_hex: hex });
+                }
+                if let Some(hex) = to_remove {
+                    self.state.uploads.remove(&hex);
+                }
+            });
     }
 
     fn sync_qr_from_ticket(&mut self) {
@@ -490,6 +654,28 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(33));
 
+        // Phase 5: drag-drop video files + Cmd/Ctrl+O file picker.
+        // Done first so newly-dropped files reflect in the side panel
+        // we render below in the same frame.
+        let mut dropped_paths: Vec<PathBuf> = Vec::new();
+        let mut open_picker = false;
+        ctx.input(|i| {
+            for dropped in &i.raw.dropped_files {
+                if let Some(path) = &dropped.path {
+                    dropped_paths.push(path.clone());
+                }
+            }
+            if i.modifiers.command && i.key_pressed(egui::Key::O) {
+                open_picker = true;
+            }
+        });
+        for path in dropped_paths {
+            self.handle_dropped_video(path);
+        }
+        if open_picker {
+            self.open_file_picker();
+        }
+
         self.sync_qr_from_ticket();
         self.drain_frame(ctx);
 
@@ -546,6 +732,10 @@ impl eframe::App for App {
                 });
             });
         });
+
+        // Phase 5: uploads side panel. Drawn before the central panel
+        // so the central panel's `available_size()` accounts for it.
+        self.draw_uploads_panel(ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(0.0))
@@ -604,6 +794,233 @@ fn status_chip(status: &ConnectionStatus) -> (egui::Color32, &'static str) {
     }
 }
 
+/// Phase 5: client-side validation of a video drop. Returns the size
+/// in bytes on success, or a short reason string on failure.
+fn validate_video_path(path: &Path) -> Result<u64, String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    match ext {
+        Some(ref e) if ACCEPTED_EXTS.iter().any(|a| a == &e.as_str()) => {}
+        Some(other) => return Err(format!("unsupported extension .{other}")),
+        None => return Err("no file extension".to_string()),
+    }
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("not readable: {e}"))?;
+    if !meta.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    if meta.len() > MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "{} exceeds 2 GiB cap",
+            format_bytes(meta.len())
+        ));
+    }
+    Ok(meta.len())
+}
+
+/// Hash on a worker thread, register a local-pending row, and send the
+/// `UploadHandoff` to the daemon. Hashing errors are surfaced as a
+/// `Failed` row in the side panel so the user gets visible feedback;
+/// they're also logged to the tracing target for postmortem.
+fn spawn_hash_and_handoff(
+    path: PathBuf,
+    filename: String,
+    size_bytes: u64,
+    uploads_state: crate::uploads::UploadsState,
+    send: mpsc::Sender<ClientMsg>,
+) {
+    let path_str = path.to_string_lossy().into_owned();
+    match uploads::hash_file_blocking(&path) {
+        Ok((blake3_hex, hashed_size)) => {
+            // Insert local-pending row immediately so the panel reflects
+            // the user's drop before the daemon's first ack.
+            uploads_state.add_local(UploadRow {
+                blake3_hex: blake3_hex.clone(),
+                filename: filename.clone(),
+                size_bytes: hashed_size,
+                state: UploadState::Queued,
+                progress_pct: 0,
+                eta_ms: None,
+                summary: None,
+                local_pending: true,
+                local_added_at: Instant::now(),
+            });
+            let msg = ClientMsg::UploadHandoff {
+                path: path_str,
+                blake3_hex,
+                size_bytes: hashed_size,
+            };
+            if let Err(e) = send.blocking_send(msg) {
+                tracing::warn!("GUI: UploadHandoff send failed: {e}");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                "GUI: BLAKE3 hash failed: {e}"
+            );
+            // Surface the failure in the panel. We don't have a real
+            // BLAKE3 (that's what failed); use a synthetic key prefixed
+            // with `local-error:` so the row is unique per failure and
+            // distinguishable from real daemon-side failed rows.
+            let synthetic_key = format!(
+                "local-error:{}:{}",
+                Instant::now().elapsed().as_nanos(),
+                path.display()
+            );
+            uploads_state.add_local(UploadRow {
+                blake3_hex: synthetic_key,
+                filename,
+                size_bytes,
+                state: UploadState::Failed {
+                    reason: format!("hashing failed: {e}"),
+                },
+                progress_pct: 0,
+                eta_ms: None,
+                summary: None,
+                local_pending: false,
+                local_added_at: Instant::now(),
+            });
+        }
+    }
+}
+
+/// Render one row in the Uploads side panel. `to_cancel` and
+/// `to_remove` are out-parameters that the caller flushes after the
+/// scroll-area pass so we don't mutate `UploadsState` mid-iteration.
+fn draw_upload_row(
+    ui: &mut egui::Ui,
+    row: &UploadRow,
+    to_cancel: &mut Option<String>,
+    to_remove: &mut Option<String>,
+) {
+    let (icon, color) = match &row.state {
+        UploadState::Queued => ("[ ]", egui::Color32::LIGHT_GRAY),
+        UploadState::Decoding => ("[~]", egui::Color32::YELLOW),
+        UploadState::Done => ("[ok]", egui::Color32::LIGHT_GREEN),
+        UploadState::Failed { .. } => ("[!]", egui::Color32::LIGHT_RED),
+    };
+    ui.horizontal(|ui| {
+        ui.colored_label(color, icon);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(&row.filename)
+                    .strong()
+                    .size(12.0),
+            )
+            .truncate(),
+        );
+    });
+
+    // Second line: size + status / progress.
+    let size_str = format_bytes(row.size_bytes);
+    let state_line = match &row.state {
+        UploadState::Queued => {
+            if row.local_pending {
+                format!("{size_str} · queued (sending…)")
+            } else {
+                format!("{size_str} · queued")
+            }
+        }
+        UploadState::Decoding => format!(
+            "{size_str} · decoding {}%",
+            row.progress_pct
+        ),
+        UploadState::Done => format!("{size_str} · done"),
+        UploadState::Failed { reason } => {
+            format!("{size_str} · failed: {reason}")
+        }
+    };
+    ui.label(
+        egui::RichText::new(state_line)
+            .font(egui::FontId::monospace(11.0))
+            .color(egui::Color32::LIGHT_GRAY),
+    );
+
+    if let Some(eta) = row.eta_ms {
+        if matches!(row.state, UploadState::Decoding) {
+            ui.label(
+                egui::RichText::new(format!("ETA {}", format_eta_ms(eta)))
+                    .font(egui::FontId::monospace(11.0))
+                    .color(egui::Color32::DARK_GRAY),
+            );
+        }
+    }
+
+    // Headline numbers when Done.
+    if let Some(head) = row.headline() {
+        ui.label(
+            egui::RichText::new(head)
+                .font(egui::FontId::monospace(11.0))
+                .color(egui::Color32::LIGHT_GREEN),
+        );
+    }
+
+    // Action button.
+    ui.horizontal(|ui| {
+        let prefix: String = row.blake3_hex.chars().take(8).collect();
+        ui.label(
+            egui::RichText::new(format!("{prefix}…"))
+                .font(egui::FontId::monospace(10.0))
+                .color(egui::Color32::DARK_GRAY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            match &row.state {
+                UploadState::Queued | UploadState::Decoding => {
+                    if ui
+                        .small_button("cancel")
+                        .on_hover_text("Tell the daemon to drop this clip")
+                        .clicked()
+                    {
+                        *to_cancel = Some(row.blake3_hex.clone());
+                    }
+                }
+                UploadState::Done | UploadState::Failed { .. } => {
+                    if ui
+                        .small_button("x")
+                        .on_hover_text("Remove from the panel (clip stays on the daemon)")
+                        .clicked()
+                    {
+                        *to_remove = Some(row.blake3_hex.clone());
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// Compact human-readable file size: `"47.3 MB"`, `"214.0 MB"`,
+/// `"1.7 GB"`. Matches the panel mock-up in the Phase 5 spec.
+fn format_bytes(n: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let n = n as f64;
+    if n >= GIB {
+        format!("{:.1} GB", n / GIB)
+    } else if n >= MIB {
+        format!("{:.1} MB", n / MIB)
+    } else if n >= KIB {
+        format!("{:.1} KB", n / KIB)
+    } else {
+        format!("{} B", n as u64)
+    }
+}
+
+/// Format a millisecond ETA as `"1m 04s"` / `"42s"`.
+fn format_eta_ms(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs >= 60 {
+        let m = secs / 60;
+        let s = secs % 60;
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// Format a duration as `HH:MM:SS` for the HUD uptime row.
 fn format_uptime(d: Duration) -> String {
     let total = d.as_secs();
@@ -640,5 +1057,51 @@ mod tests {
         // Sanity-check the constant so a future edit doesn't blow out
         // the bottom panel height.
         assert_eq!(HUD_ASCII.lines().count(), 4);
+    }
+
+    #[test]
+    fn format_bytes_picks_unit() {
+        assert_eq!(format_bytes(900), "900 B");
+        assert_eq!(format_bytes(2 * 1024), "2.0 KB");
+        assert_eq!(
+            format_bytes(47 * 1024 * 1024 + 300 * 1024),
+            "47.3 MB"
+        );
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    #[test]
+    fn format_eta_ms_seconds_and_minutes() {
+        assert_eq!(format_eta_ms(0), "0s");
+        assert_eq!(format_eta_ms(42_000), "42s");
+        assert_eq!(format_eta_ms(64_000), "1m 04s");
+        assert_eq!(format_eta_ms(125_000), "2m 05s");
+    }
+
+    #[test]
+    fn validate_video_path_rejects_unknown_ext() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "herd-scout-gui-validate-test-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"hello").unwrap();
+        let res = validate_video_path(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(res.is_err(), "expected unsupported-ext rejection");
+    }
+
+    #[test]
+    fn validate_video_path_accepts_mp4() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "herd-scout-gui-validate-test-{}.mp4",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"not really an mp4 but the validator only checks ext + size").unwrap();
+        let res = validate_video_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let size = res.expect("mp4 should validate");
+        assert!(size > 0);
     }
 }

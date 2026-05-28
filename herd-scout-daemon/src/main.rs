@@ -19,14 +19,12 @@
 //! HERD_SCOUT_TICKET="iroh-live:..." cargo run -p herd-scout-daemon
 //! ```
 
-// `cv` is declared in `lib.rs` so it can be reached by `examples/cv-probe.rs`.
-// Everything else stays bin-private.
-use herd_scout_daemon::cv;
-mod admin;
-mod audit;
-mod control;
+// Wave 13: many formerly-bin-private modules now live under
+// `lib.rs` so the upload pipeline can share them with the daemon
+// binary. Bin-only modules (everything that doesn't need to be
+// reachable from `upload`) stay declared here.
+use herd_scout_daemon::{admin, audit, control, cv, ipc, upload};
 mod daemon_secret;
-mod ipc;
 mod pairing;
 mod preview;
 mod store;
@@ -145,14 +143,48 @@ async fn main() -> Result<()> {
         metrics.clone(),
     );
 
+    // Wave 13: the upload subsystem.
+    let uploads_dir = match upload::store::resolve_uploads_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            error!("upload: cannot resolve uploads dir, disabling upload pipeline: {e:#}");
+            std::env::temp_dir().join("herd-scout-uploads-fallback")
+        }
+    };
+    let upload_queue = match upload::queue::Queue::load_or_init(&uploads_dir).await {
+        Ok(q) => q,
+        Err(e) => {
+            error!("upload: queue load failed: {e:#}");
+            // Continue with an empty queue; persistence will retry on
+            // the next mutation.
+            upload::queue::Queue::load_or_init(&std::env::temp_dir().join("herd-scout-empty-queue"))
+                .await
+                .expect("temp queue fallback")
+        }
+    };
+
+    // Server broadcast channel must exist before we build the upload
+    // handler (which clones the sender for fan-out). Establish it
+    // here, ahead of the rest of the channel wiring further down.
+    let (server_tx, _) = broadcast::channel::<ServerMsg>(256);
+
+    let upload_handler = upload::handler::UploadHandler::new(
+        control_cfg.clone(),
+        audit_log.clone(),
+        upload_queue.clone(),
+        uploads_dir.clone(),
+        server_tx.clone(),
+    );
+
     // Mount moq + gossip via Live::register_protocols, then add our
-    // SSH-bridge ALPN (Wave 11) and the admin RPC ALPN (Wave 12). The
-    // Router is kept alive for the lifetime of `main` — dropping it
-    // aborts the accept loop.
+    // SSH-bridge ALPN (Wave 11), the admin RPC ALPN (Wave 12), and the
+    // upload ALPN (Wave 13). The Router is kept alive for the lifetime
+    // of `main` — dropping it aborts the accept loop.
     let router = live
         .register_protocols(iroh::protocol::Router::builder(endpoint))
         .accept(herd_scout_ipc::CONTROL_ALPN, control_handler)
         .accept(herd_scout_ipc::ADMIN_ALPN, admin_handler)
+        .accept(herd_scout_ipc::UPLOAD_ALPN, upload_handler.clone())
         .spawn();
     info!(
         id = %live.endpoint().id().fmt_short(),
@@ -167,11 +199,17 @@ async fn main() -> Result<()> {
     info!(broadcast = %broadcast_name, "ticket ready: {ticket}");
     println!("herd-scout-daemon ticket: {ticket}");
 
-    // Internal channels.
-    let (server_tx, _) = broadcast::channel::<ServerMsg>(256);
+    // Internal channels. `server_tx` was created earlier so the upload
+    // handler could capture a clone before the router builder ran.
     let (frame_tx, frame_rx) = watch::channel(None);
-    let (status_tx, _status_rx) = watch::channel(ConnectionStatus::Idle);
+    let (status_tx, status_rx) = watch::channel(ConnectionStatus::Idle);
     let (last_frame_tx, _last_frame_rx) = watch::channel::<Option<Instant>>(None);
+
+    // Wave 13: a watch channel the CV task publishes the sidecar
+    // handle into, so the upload processor can grab it once `Detector::new`
+    // succeeds. `None` until the detector is ready.
+    let (sidecar_tx, sidecar_rx) =
+        watch::channel::<Option<cv::model::SidecarHandle>>(None);
 
     // CV → IPC mpsc; the CV task pushes Detections / CvBanner here, and
     // a small forwarder fan-outs onto the broadcast.
@@ -187,7 +225,18 @@ async fn main() -> Result<()> {
 
     // CV inference task (Wave 3, ported).
     let snapshot = cv::state::new_shared_snapshot();
-    cv::spawn_cv_task(frame_rx.clone(), snapshot.clone(), cv_tx);
+    cv::spawn_cv_task(frame_rx.clone(), snapshot.clone(), cv_tx, Some(sidecar_tx));
+
+    // Wave 13: spawn the upload processor. It waits on the sidecar
+    // handle becoming available, then loops on the queue.
+    upload::processor::spawn_processor(
+        upload_queue.clone(),
+        uploads_dir.clone(),
+        sidecar_rx,
+        status_rx,
+        server_tx.clone(),
+        audit_log.clone(),
+    );
 
     let state = DaemonState {
         live: live.clone(),
@@ -329,6 +378,23 @@ async fn main() -> Result<()> {
             ClientMsg::Shutdown => {
                 info!("Shutdown requested by GUI; exiting daemon");
                 break;
+            }
+            ClientMsg::UploadHandoff {
+                path,
+                blake3_hex,
+                size_bytes,
+            } => {
+                let h = upload_handler.clone();
+                tokio::spawn(async move {
+                    upload::handler::handle_local_handoff(&h, &path, &blake3_hex, size_bytes)
+                        .await;
+                });
+            }
+            ClientMsg::UploadCancel { blake3_hex } => {
+                let h = upload_handler.clone();
+                tokio::spawn(async move {
+                    upload::handler::handle_local_cancel(&h, &blake3_hex).await;
+                });
             }
         }
     }

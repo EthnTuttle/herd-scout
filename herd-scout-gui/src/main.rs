@@ -17,6 +17,7 @@ mod ipc;
 mod overlay;
 mod pairing;
 mod ui;
+mod uploads;
 
 use std::path::PathBuf;
 use std::process::Stdio;

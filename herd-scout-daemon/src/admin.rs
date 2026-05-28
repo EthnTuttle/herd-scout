@@ -12,4 +12,4 @@
 
 mod handler;
 
-pub(crate) use handler::AdminHandler;
+pub use handler::AdminHandler;

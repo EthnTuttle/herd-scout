@@ -16,6 +16,8 @@
 //! versioned TOML envelope; legacy `secret.key` files are auto-upgraded
 //! the first time `herdctl` runs after the upgrade.
 
+mod upload;
+
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -39,6 +41,40 @@ enum Cmd {
     Ping { node_id: String },
     /// Print the local NodeId; paste into ~/.ssh/config or daemon's control.toml.
     Whoami,
+    /// Upload a video clip to a daemon for CV processing.
+    Push {
+        /// Daemon NodeId (canonical EndpointId string).
+        node_id: String,
+        /// Local path to the MP4/MOV/M4V clip.
+        path: PathBuf,
+        /// Skip waiting for processing to finish; exit after acceptance.
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Manage queued / recent uploads on a daemon.
+    Uploads {
+        #[command(subcommand)]
+        op: UploadsOp,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum UploadsOp {
+    /// List the daemon's upload queue.
+    List { node_id: String },
+    /// Cancel a queued upload by full BLAKE3 hex (or unique prefix).
+    Cancel {
+        node_id: String,
+        blake3_prefix: String,
+    },
+    /// Fetch the JSON report for a finished clip.
+    Report {
+        node_id: String,
+        blake3_prefix: String,
+        /// Print pretty-formatted JSON instead of headline summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -55,6 +91,23 @@ async fn main() -> Result<()> {
         Cmd::Proxy { node_id } => proxy(&node_id).await,
         Cmd::Ping { node_id } => ping(&node_id).await,
         Cmd::Whoami => whoami().await,
+        Cmd::Push {
+            node_id,
+            path,
+            no_wait,
+        } => upload::push(&node_id, &path, no_wait).await,
+        Cmd::Uploads { op } => match op {
+            UploadsOp::List { node_id } => upload::list(&node_id).await,
+            UploadsOp::Cancel {
+                node_id,
+                blake3_prefix,
+            } => upload::cancel(&node_id, &blake3_prefix).await,
+            UploadsOp::Report {
+                node_id,
+                blake3_prefix,
+                json,
+            } => upload::report(&node_id, &blake3_prefix, json).await,
+        },
     }
 }
 
@@ -65,7 +118,7 @@ fn identity_path() -> Result<PathBuf> {
     Ok(dirs.config_dir().join("identity.toml"))
 }
 
-async fn make_endpoint() -> Result<Endpoint> {
+pub(crate) async fn make_endpoint() -> Result<Endpoint> {
     let path = identity_path()?;
     let id = herd_scout_identity::load_or_generate(&path, "herdctl")
         .with_context(|| format!("load or create identity at {}", path.display()))?;

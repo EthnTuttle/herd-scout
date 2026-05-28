@@ -16,9 +16,12 @@ from pathlib import Path
 
 import numpy as np
 
+REQ_KIND = struct.Struct("<I")
+REQ_KIND_FRAME = 0x00  # live frame mode (Phase 1, 2026-05-28: now an explicit prefix)
 REQ_HDR = struct.Struct("<IIII")
 RESP_HDR = struct.Struct("<II")
-DET_PACK = struct.Struct("<Ifffff")
+# class_id u32, track_id u32, conf f32, x1 f32, y1 f32, x2 f32, y2 f32
+DET_PACK = struct.Struct("<IIfffff")
 
 
 def main() -> int:
@@ -38,9 +41,10 @@ def main() -> int:
     assert len(payload) == w * h * 3
 
     for frame_id in range(5):
+        kind = REQ_KIND.pack(REQ_KIND_FRAME)
         hdr = REQ_HDR.pack(frame_id, w, h, len(payload))
         t0 = time.time()
-        s.sendall(hdr + payload)
+        s.sendall(kind + hdr + payload)
 
         resp_hdr = b""
         while len(resp_hdr) < RESP_HDR.size:
@@ -64,8 +68,8 @@ def main() -> int:
         rtt_ms = (time.time() - t0) * 1000
         dets = []
         for i in range(n_dets):
-            cls, conf, x1, y1, x2, y2 = DET_PACK.unpack_from(det_bytes, i * DET_PACK.size)
-            dets.append((cls, conf, x1, y1, x2, y2))
+            cls, tid, conf, x1, y1, x2, y2 = DET_PACK.unpack_from(det_bytes, i * DET_PACK.size)
+            dets.append((cls, tid, conf, x1, y1, x2, y2))
         print(f"frame {frame_id}: rtt={rtt_ms:.1f} ms, n_dets={n_dets} {dets[:3]}")
 
     s.close()

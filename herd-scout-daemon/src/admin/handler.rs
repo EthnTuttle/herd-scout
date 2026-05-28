@@ -28,7 +28,7 @@ use crate::control::{ControlConfig, write_atomic};
 use crate::ipc::frame;
 
 #[derive(Debug, Clone)]
-pub(crate) struct AdminHandler {
+pub struct AdminHandler {
     cfg: Arc<ArcSwap<ControlConfig>>,
     own_node_id: EndpointId,
     config_path: PathBuf,
@@ -40,7 +40,7 @@ pub(crate) struct AdminHandler {
 }
 
 impl AdminHandler {
-    pub(crate) fn new(
+    pub fn new(
         cfg: Arc<ArcSwap<ControlConfig>>,
         own_node_id: EndpointId,
         config_path: PathBuf,

@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::frame::{read_frame, write_frame};
+use crate::uploads::UploadsState;
 
 /// Snapshot of the latest preview frame the daemon emitted.
 #[derive(Debug, Clone, Default)]
@@ -61,6 +62,10 @@ pub struct SharedClientState {
     pub disconnected: RwLock<bool>,
     /// Daemon's reported version, populated from the first `Hello`.
     pub daemon_version: RwLock<Option<String>>,
+    /// Phase 5: drag-drop / file-picker upload pipeline state. Cheap
+    /// to share — internally `Arc<RwLock<…>>` — and read by the egui
+    /// paint loop on every repaint.
+    pub uploads: UploadsState,
 }
 
 impl SharedClientState {
@@ -210,6 +215,7 @@ fn apply_msg(state: &SharedClientState, msg: ServerMsg) {
             height,
             pts_ms,
             jpeg,
+            clip_id: _,
         } => {
             let now = Instant::now();
             let mut g = state.latest_frame.write();
@@ -223,6 +229,7 @@ fn apply_msg(state: &SharedClientState, msg: ServerMsg) {
             frame_pts_ms,
             dets,
             counts,
+            clip_id: _,
         } => {
             let mut g = state.latest_dets.write();
             g.frame_pts_ms = frame_pts_ms;
@@ -233,6 +240,23 @@ fn apply_msg(state: &SharedClientState, msg: ServerMsg) {
             let mut g = state.latest_dets.write();
             g.cv_banner = text;
             g.cv_disabled = disabled;
+        }
+        ServerMsg::UploadStatus {
+            blake3_hex,
+            filename,
+            state: upload_state,
+            progress_pct,
+            eta_ms,
+            summary,
+        } => {
+            state.uploads.apply_status(
+                blake3_hex,
+                filename,
+                upload_state,
+                progress_pct,
+                eta_ms,
+                summary,
+            );
         }
     }
 }

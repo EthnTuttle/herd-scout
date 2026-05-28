@@ -22,20 +22,23 @@
 //! Sidecar -> daemon (response):
 //! ```text
 //! u32 frame_id  u32 n_dets
-//! For each det: u32 class_id  f32 conf  f32 x1  f32 y1  f32 x2  f32 y2
+//! For each det: u32 class_id  u32 track_id  f32 conf  f32 x1  f32 y1  f32 x2  f32 y2
 //! ```
 //!
 //! `class_id` is the wire enum (0=horse, 1=sheep, 2=cow), already
-//! filtered + class-mapped by the sidecar. Bounding box is in
-//! source-frame pixel space. The sidecar handles preprocessing
-//! (resize/normalize/dtype-cast) and postprocessing (NMS, class
-//! filtering).
+//! filtered + class-mapped by the sidecar. `track_id` is the
+//! ByteTrack-assigned persistent ID for the detection across frames;
+//! `0xFFFFFFFF` means the tracker has not yet assigned an ID. Bounding
+//! box is in source-frame pixel space. The sidecar handles
+//! preprocessing (resize/normalize/dtype-cast) and postprocessing (NMS,
+//! class filtering, tracking).
 
 use std::env;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -108,7 +111,15 @@ pub struct Detection {
     /// `[x1, y1, x2, y2]` in original frame pixel space (top-left origin).
     pub bbox: [f32; 4],
     pub score: f32,
+    /// Persistent track id assigned by the sidecar's ByteTrack; `None`
+    /// when the tracker has not yet attached an ID (sentinel value
+    /// `0xFFFFFFFF` on the wire).
+    pub track_id: Option<u32>,
 }
+
+/// Wire sentinel for "no track ID assigned yet" — must match the
+/// sidecar's `NO_TRACK_ID` constant.
+const NO_TRACK_ID: u32 = 0xFFFF_FFFF;
 
 /// Default sidecar socket path. Override with the `CV_SIDECAR_SOCKET`
 /// env var. Matches the path the systemd unit binds in
@@ -120,15 +131,30 @@ const DEFAULT_SIDECAR_SOCKET: &str = "/run/herd-scout/cv.sock";
 /// on the first frame.
 const SIDECAR_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Shared handle to the sidecar's Unix-domain socket connection. The
+/// live CV path and the upload processor (Wave 13) both grab the
+/// `Mutex` to send a request — live takes it per-frame, upload holds
+/// it for the duration of one clip.
+///
+/// `std::sync::Mutex` is correct here: the I/O is synchronous and
+/// every caller does the work inside `spawn_blocking`, so there's no
+/// `.await` while holding the lock and `tokio::sync::Mutex` would
+/// just bounce the wakers needlessly.
+pub type SidecarHandle = Arc<StdMutex<UnixStream>>;
+
 /// Wire client for the cv-sidecar Python process.
 ///
 /// Construction can fail if the sidecar isn't running (the systemd
 /// dependency `BindsTo=` should normally prevent this). Callers that
 /// want soft-fail behaviour should match on the `Result` returned by
 /// [`Detector::new`] and continue with a "CV disabled" snapshot.
+///
+/// The socket is wrapped in [`SidecarHandle`] (an `Arc<Mutex<_>>`) so
+/// the upload pipeline can borrow exclusive sidecar access for the
+/// duration of a clip without disturbing the live frame path.
 pub struct Detector {
     socket_path: PathBuf,
-    stream: UnixStream,
+    handle: SidecarHandle,
     next_frame_id: AtomicU32,
     /// Reusable scratch buffer for the BGR conversion. Avoids
     /// per-frame allocation in the hot path.
@@ -171,10 +197,19 @@ impl Detector {
 
         Ok(Self {
             socket_path,
-            stream,
+            handle: Arc::new(StdMutex::new(stream)),
             next_frame_id: AtomicU32::new(0),
             bgr_buf: Vec::new(),
         })
+    }
+
+    /// Cloneable handle to the sidecar's UnixStream. The upload
+    /// processor takes one of these to drive file-mode (`0x01`)
+    /// requests; live frame requests go through [`Detector::infer`]
+    /// which uses the same handle internally so the two paths are
+    /// serialised by the inner `Mutex`.
+    pub fn handle(&self) -> SidecarHandle {
+        self.handle.clone()
     }
 
     /// Send one frame to the sidecar and read back its detections.
@@ -182,6 +217,12 @@ impl Detector {
     /// `&mut self` is required because the underlying Unix socket is
     /// not `Sync`; the calling code already serializes via a Tokio
     /// `Mutex` (see `cv/task.rs`).
+    ///
+    /// **Wave 13 wire-protocol bump:** every request is now prefixed
+    /// with a `request_kind: u32 = 0x00` selector so the sidecar can
+    /// dispatch live frame requests vs file-mode (`0x01`) requests on
+    /// the same socket. The response framing is unchanged for live
+    /// (no `pts_ms` field — that's file-mode-only).
     pub fn infer(&mut self, frame: &VideoFrame) -> Result<Vec<Detection>> {
         let w = frame.width();
         let h = frame.height();
@@ -209,23 +250,30 @@ impl Detector {
         let frame_id = self.next_frame_id.fetch_add(1, Ordering::Relaxed);
         let payload_len = bgr_len as u32;
 
-        // Header: 4 × u32 LE = 16 bytes
-        let mut hdr = [0u8; 16];
-        hdr[0..4].copy_from_slice(&frame_id.to_le_bytes());
-        hdr[4..8].copy_from_slice(&w.to_le_bytes());
-        hdr[8..12].copy_from_slice(&h.to_le_bytes());
-        hdr[12..16].copy_from_slice(&payload_len.to_le_bytes());
+        // Header: u32 request_kind = 0x00, then 4 × u32 LE = 16 bytes,
+        // then the BGR24 payload.
+        let mut prefixed_hdr = [0u8; 20];
+        prefixed_hdr[0..4].copy_from_slice(&0u32.to_le_bytes()); // REQ_KIND_FRAME
+        prefixed_hdr[4..8].copy_from_slice(&frame_id.to_le_bytes());
+        prefixed_hdr[8..12].copy_from_slice(&w.to_le_bytes());
+        prefixed_hdr[12..16].copy_from_slice(&h.to_le_bytes());
+        prefixed_hdr[16..20].copy_from_slice(&payload_len.to_le_bytes());
 
-        self.stream
-            .write_all(&hdr)
+        let mut stream = self
+            .handle
+            .lock()
+            .map_err(|e| anyhow::anyhow!("sidecar handle poisoned: {e}"))?;
+
+        stream
+            .write_all(&prefixed_hdr)
             .context("write request header to sidecar")?;
-        self.stream
+        stream
             .write_all(&self.bgr_buf)
             .context("write request payload to sidecar")?;
 
         // Response header: u32 frame_id + u32 n_dets
         let mut resp_hdr = [0u8; 8];
-        self.stream
+        stream
             .read_exact(&mut resp_hdr)
             .context("read response header from sidecar")?;
         let recv_frame_id = u32::from_le_bytes(resp_hdr[0..4].try_into().unwrap());
@@ -237,33 +285,41 @@ impl Detector {
             );
         }
 
-        // Each det: u32 class + 5 × f32 = 24 bytes
-        const DET_BYTES: usize = 24;
+        // Each det: 2 × u32 (class, track_id) + 5 × f32 (conf, xyxy) = 28 bytes
+        const DET_BYTES: usize = 28;
         if n_dets > 1024 {
             // Sanity guard against runaway / corrupt response
             anyhow::bail!("sidecar reported absurd n_dets={n_dets}; aborting");
         }
         let mut det_buf = vec![0u8; n_dets * DET_BYTES];
         if !det_buf.is_empty() {
-            self.stream
+            stream
                 .read_exact(&mut det_buf)
                 .context("read detections from sidecar")?;
         }
+
+        // Drop the sidecar lock as soon as I/O is done — parsing the
+        // detection rows doesn't need exclusive socket access and
+        // releasing early keeps the upload processor's wait time tight.
+        drop(stream);
 
         let mut out = Vec::with_capacity(n_dets);
         for i in 0..n_dets {
             let off = i * DET_BYTES;
             let cls_wire = u32::from_le_bytes(det_buf[off..off + 4].try_into().unwrap());
-            let conf = f32::from_le_bytes(det_buf[off + 4..off + 8].try_into().unwrap());
-            let x1 = f32::from_le_bytes(det_buf[off + 8..off + 12].try_into().unwrap());
-            let y1 = f32::from_le_bytes(det_buf[off + 12..off + 16].try_into().unwrap());
-            let x2 = f32::from_le_bytes(det_buf[off + 16..off + 20].try_into().unwrap());
-            let y2 = f32::from_le_bytes(det_buf[off + 20..off + 24].try_into().unwrap());
+            let track_id_wire = u32::from_le_bytes(det_buf[off + 4..off + 8].try_into().unwrap());
+            let conf = f32::from_le_bytes(det_buf[off + 8..off + 12].try_into().unwrap());
+            let x1 = f32::from_le_bytes(det_buf[off + 12..off + 16].try_into().unwrap());
+            let y1 = f32::from_le_bytes(det_buf[off + 16..off + 20].try_into().unwrap());
+            let x2 = f32::from_le_bytes(det_buf[off + 20..off + 24].try_into().unwrap());
+            let y2 = f32::from_le_bytes(det_buf[off + 24..off + 28].try_into().unwrap());
             if let Some(class) = CocoClass::from_wire(cls_wire) {
+                let track_id = (track_id_wire != NO_TRACK_ID).then_some(track_id_wire);
                 out.push(Detection {
                     class,
                     bbox: [x1, y1, x2, y2],
                     score: conf,
+                    track_id,
                 });
             } else {
                 tracing::warn!("CV: sidecar returned unknown class id {cls_wire}; skipping");

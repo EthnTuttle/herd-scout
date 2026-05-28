@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info, warn};
 
-use super::model::{CocoClass, Detector};
+use super::model::{CocoClass, Detector, SidecarHandle};
 use super::state::{ClassCounts, SharedSnapshot};
 
 /// Frame budget. Locked at 10 FPS by the design doc.
@@ -50,10 +50,17 @@ fn counts_to_wire(c: ClassCounts) -> ClassCountsWire {
 /// `ipc_tx`: each successful inference emits a `ServerMsg::Detections`
 /// to this channel; an init failure emits a `ServerMsg::CvBanner` and
 /// the task exits.
+///
+/// `handle_tx`: when set, the task publishes the sidecar's
+/// [`SidecarHandle`] once the detector successfully connects. The
+/// upload processor (Wave 13) subscribes to this so it can drive the
+/// sidecar through file-mode requests when no live phone session is
+/// active.
 pub fn spawn_cv_task(
     mut frame_rx: watch::Receiver<Option<Arc<VideoFrame>>>,
     snapshot: SharedSnapshot,
     ipc_tx: mpsc::Sender<ServerMsg>,
+    handle_tx: Option<watch::Sender<Option<SidecarHandle>>>,
 ) {
     tokio::spawn(async move {
         // Build the detector on the inference task so any init cost
@@ -89,6 +96,13 @@ pub fn spawn_cv_task(
             }
         };
         info!("CV: YOLOv5n session ready (10 FPS budget)");
+
+        // Publish the sidecar handle to whichever consumers are
+        // waiting on it (the upload processor is the only one today;
+        // future "headless dump" modes could subscribe similarly).
+        if let Some(tx) = handle_tx {
+            let _ = tx.send(Some(detector.handle()));
+        }
 
         // The detector is owned by an `Arc<Mutex>` so each
         // `spawn_blocking` body can take it for the duration of one
@@ -144,6 +158,7 @@ pub fn spawn_cv_task(
                                 d.bbox[3] / src_h,
                             ],
                             score: d.score,
+                            track_id: d.track_id,
                         })
                         .collect();
 
@@ -155,6 +170,7 @@ pub fn spawn_cv_task(
                             frame_pts_ms,
                             dets: wire_dets,
                             counts: counts_wire,
+                            clip_id: None,
                         })
                         .await;
                 }

@@ -54,6 +54,12 @@ toml = "0.8"
 # === Wave 12: audit log ===
 time = { version = "0.3", features = ["formatting", "macros"] }
 
+# === Wave 13: upload pipeline ===
+# Streaming BLAKE3 hasher for verifying client-reported clip hashes.
+# The version pin matches the iroh-blobs transitive dep already present in
+# Cargo.lock so we don't trigger a rebuild of the whole tree.
+blake3 = "1"
+
 [features]
 default = []
 

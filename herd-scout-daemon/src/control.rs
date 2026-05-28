@@ -10,8 +10,8 @@
 mod config;
 mod handler;
 
-pub(crate) use config::{ControlConfig, config_path, load_or_default, write_atomic};
-pub(crate) use handler::ControlHandler;
+pub use config::{ControlConfig, config_path, load_or_default, write_atomic};
+pub use handler::ControlHandler;
 
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ use crate::audit::{Audit, ControlMetrics};
 /// Wave 12: each successful reload also stamps `ControlMetrics` and
 /// emits a `config_reload` audit record so `Status` and the History
 /// tab can surface "operator hand-edited at HH:MM."
-pub(crate) fn spawn_sighup_reloader(
+pub fn spawn_sighup_reloader(
     cfg: Arc<ArcSwap<ControlConfig>>,
     metrics: Arc<ControlMetrics>,
     audit: Audit,

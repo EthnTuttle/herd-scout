@@ -31,7 +31,7 @@ use tracing::{info, warn};
 /// Schema version for audit records. Bump when adding fields that
 /// downstream readers must branch on; new optional fields can land at
 /// the same version because the wire `details` is `serde_json::Value`.
-pub(crate) const AUDIT_SCHEMA_VERSION: u32 = 1;
+pub const AUDIT_SCHEMA_VERSION: u32 = 1;
 
 /// Active log file name within the audit dir.
 const ACTIVE_LOG: &str = "audit.log";
@@ -45,7 +45,7 @@ const MAX_TAIL_RECORDS: usize = 500;
 // ── Metrics shared between SSH + admin handlers ─────────────────────────
 
 #[derive(Debug, Default)]
-pub(crate) struct ControlMetrics {
+pub struct ControlMetrics {
     pub active_ssh_sessions: AtomicUsize,
     pub last_reload_unix_ms: AtomicU64,
     /// Source of the last reload. Stored as a `&'static str` slot via
@@ -55,7 +55,7 @@ pub(crate) struct ControlMetrics {
 }
 
 impl ControlMetrics {
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             active_ssh_sessions: AtomicUsize::new(0),
             last_reload_unix_ms: AtomicU64::new(0),
@@ -63,7 +63,7 @@ impl ControlMetrics {
         })
     }
 
-    pub(crate) fn record_reload(&self, source: &'static str) {
+    pub fn record_reload(&self, source: &'static str) {
         self.last_reload_unix_ms
             .store(now_unix_ms(), Ordering::Release);
         self.last_reload_source.store(Arc::new(source));
@@ -74,7 +74,7 @@ impl ControlMetrics {
 
 /// Append-only JSONL writer. Cheap clone (`Arc` inside).
 #[derive(Debug, Clone)]
-pub(crate) struct Audit {
+pub struct Audit {
     inner: Arc<AuditInner>,
 }
 
@@ -86,7 +86,7 @@ struct AuditInner {
 
 impl Audit {
     /// Open / create the active log file. Creates the dir as needed.
-    pub(crate) async fn open(dir: PathBuf) -> Result<Self> {
+    pub async fn open(dir: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(&dir)
             .await
             .with_context(|| format!("create audit dir {}", dir.display()))?;
@@ -101,14 +101,14 @@ impl Audit {
         })
     }
 
-    pub(crate) fn dir(&self) -> &Path {
+    pub fn dir(&self) -> &Path {
         &self.inner.dir
     }
 
     /// Append one record. Failures log a warn but do not propagate —
     /// the audit log is best-effort and must never block user-visible
     /// ops.
-    pub(crate) async fn append(&self, record: AuditRecord) {
+    pub async fn append(&self, record: AuditRecord) {
         let mut line = match serde_json::to_string(&record) {
             Ok(s) => s,
             Err(e) => {
@@ -126,7 +126,7 @@ impl Audit {
     }
 
     /// Convenience: build a record stamped now and append it.
-    pub(crate) async fn log(
+    pub async fn log(
         &self,
         kind: &str,
         actor_node_id: Option<String>,
@@ -147,7 +147,7 @@ impl Audit {
     /// Atomically rotate the active log if its first record is from a
     /// previous UTC day, then sweep retention. No-op on parse errors
     /// (we'd rather keep an unrotateable log than lose data).
-    pub(crate) async fn rotate_if_needed(&self) {
+    pub async fn rotate_if_needed(&self) {
         let active_path = self.inner.dir.join(ACTIVE_LOG);
         let today = current_utc_date_string();
         let first_date = match read_first_record_date(&active_path).await {
@@ -208,7 +208,7 @@ impl Audit {
     /// newest-first order. Walks the active file then rotated files
     /// in reverse-chronological-name order until the cap is hit.
     /// Sets `eof=true` when no older records exist for this filter.
-    pub(crate) async fn tail(
+    pub async fn tail(
         &self,
         last_n: u32,
         before_ts_ms: Option<u64>,
@@ -246,7 +246,7 @@ impl Audit {
 
 /// Spawn a task that calls `rotate_if_needed` shortly after each UTC
 /// midnight (with a small jitter) plus every 6 h as a safety net.
-pub(crate) fn spawn_rotation_task(audit: Audit) {
+pub fn spawn_rotation_task(audit: Audit) {
     tokio::spawn(async move {
         loop {
             let sleep = next_rotation_sleep();
@@ -418,7 +418,7 @@ async fn collect_from_file(
     Ok(())
 }
 
-pub(crate) fn now_unix_ms() -> u64 {
+pub fn now_unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -451,7 +451,7 @@ fn unix_ms_to_utc_date_string(ms: u64) -> String {
 
 /// Compute the daemon's data dir for audit storage. Mirrors the path
 /// scheme the daemon already uses for prefs (`Store::open`).
-pub(crate) fn audit_dir() -> Result<PathBuf> {
+pub fn audit_dir() -> Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("net", "herd-scout", "herd-scout")
         .context("no user-data directory available on this platform")?;
     Ok(dirs.data_dir().to_path_buf())

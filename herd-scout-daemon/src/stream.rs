@@ -241,6 +241,7 @@ async fn run_session(state: DaemonState, mut session: iroh_moq::MoqSession) -> R
                         width: p.width,
                         height: p.height,
                         pts_ms: p.pts_ms,
+                        clip_id: None,
                         jpeg: p.jpeg,
                     });
                 });

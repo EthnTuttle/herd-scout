@@ -35,3 +35,9 @@ anyhow = "1"
 # === Daemon spawn helper (for getting the user-data dir for socket paths and logs) ===
 directories = "5"
 
+# === Phase 5 (desktop video upload): client-side BLAKE3 hashing of dropped clips
+# (must match the version used by herd-scout-daemon and herdctl) plus a native
+# file picker for the Cmd/Ctrl+O hotkey. ===
+blake3 = "1"
+rfd = "0.15"
+

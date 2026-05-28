@@ -20,18 +20,18 @@ const DEFAULT_SSH_TARGET: &str = "127.0.0.1:22";
 
 /// Resolved control-plane config.
 #[derive(Debug, Clone)]
-pub(crate) struct ControlConfig {
+pub struct ControlConfig {
     /// SSH-bridge allowlist with labels (Wave 12 schema). Source of
     /// truth for serialization back to disk; `allowed_node_ids` is the
     /// O(1) gate-check projection.
-    pub(crate) allowed: Vec<AllowedEntry>,
+    pub allowed: Vec<AllowedEntry>,
     /// O(1) lookup set rebuilt from `allowed` on every load. Wave 11
     /// SSH handler uses this directly.
-    pub(crate) allowed_node_ids: HashSet<EndpointId>,
+    pub allowed_node_ids: HashSet<EndpointId>,
     /// Admin RPC allowlist: peers that may dial `ADMIN_ALPN` and call
     /// allowlist-mutation RPCs. Wave 12.
-    pub(crate) admins: HashSet<EndpointId>,
-    pub(crate) ssh_target: SocketAddr,
+    pub admins: HashSet<EndpointId>,
+    pub ssh_target: SocketAddr,
 }
 
 impl Default for ControlConfig {
@@ -48,8 +48,8 @@ impl Default for ControlConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct RawFile {
-    pub(crate) control_plane: RawSection,
+pub struct RawFile {
+    pub control_plane: RawSection,
 }
 
 /// Both the parser input and the rewriter output. Backwards-compat:
@@ -57,32 +57,32 @@ pub(crate) struct RawFile {
 /// `[[control_plane.allowed]]` array-of-tables (Wave 12). Always
 /// writes the new shape.
 #[derive(Debug, Default, Deserialize, Serialize)]
-pub(crate) struct RawSection {
+pub struct RawSection {
     /// Wave 12 schema: labeled SSH allowlist. `[[control_plane.allowed]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) allowed: Vec<RawAllowed>,
+    pub allowed: Vec<RawAllowed>,
     /// Wave 11 schema: bare NodeId list. Honored on read; never written.
     #[serde(default, skip_serializing)]
-    pub(crate) allowed_node_ids: Vec<String>,
+    pub allowed_node_ids: Vec<String>,
     /// Wave 12: admin RPC allowlist. Plain list of canonical NodeId
     /// strings. Empty by default (fail-closed); requires hand-edit +
     /// SIGHUP for the first admin device.
     #[serde(default)]
-    pub(crate) admins: Vec<String>,
+    pub admins: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) ssh_target: Option<String>,
+    pub ssh_target: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct RawAllowed {
-    pub(crate) node_id: String,
+pub struct RawAllowed {
+    pub node_id: String,
     #[serde(default)]
-    pub(crate) label: String,
+    pub label: String,
 }
 
 /// Resolve the `control.toml` path. Honors `$HERD_SCOUT_CONFIG_DIR` for
 /// tests / non-standard installs; otherwise uses the platform config dir.
-pub(crate) fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     if let Ok(dir) = std::env::var("HERD_SCOUT_CONFIG_DIR") {
         return PathBuf::from(dir).join("control.toml");
     }
@@ -95,7 +95,7 @@ pub(crate) fn config_path() -> PathBuf {
 /// Load `control.toml` from `path`. Returns the default (empty allowlist)
 /// when the file is missing. Returns Err only when the file exists but
 /// is malformed.
-pub(crate) fn load_or_default(path: &Path) -> Result<ControlConfig> {
+pub fn load_or_default(path: &Path) -> Result<ControlConfig> {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -186,7 +186,7 @@ pub(crate) fn load_or_default(path: &Path) -> Result<ControlConfig> {
 /// once the admin RPC starts writing it. The first admin RPC write
 /// also rewrites the schema in the new `[[control_plane.allowed]]`
 /// shape (Wave 11 `allowed_node_ids = [...]` is read but never written).
-pub(crate) fn write_atomic(path: &Path, cfg: &ControlConfig) -> Result<()> {
+pub fn write_atomic(path: &Path, cfg: &ControlConfig) -> Result<()> {
     let raw = RawFile {
         control_plane: RawSection {
             allowed: cfg

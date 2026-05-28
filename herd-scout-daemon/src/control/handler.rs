@@ -35,7 +35,7 @@ use crate::audit::{Audit, ControlMetrics};
 const MAX_SESSIONS: usize = 16;
 
 #[derive(Debug, Clone)]
-pub(crate) struct ControlHandler {
+pub struct ControlHandler {
     cfg: Arc<ArcSwap<ControlConfig>>,
     own_node_id: EndpointId,
     metrics: Arc<ControlMetrics>,
@@ -43,7 +43,7 @@ pub(crate) struct ControlHandler {
 }
 
 impl ControlHandler {
-    pub(crate) fn new(
+    pub fn new(
         cfg: Arc<ArcSwap<ControlConfig>>,
         own_node_id: EndpointId,
         metrics: Arc<ControlMetrics>,

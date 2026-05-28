@@ -43,6 +43,20 @@ pub const CONTROL_ALPN: &[u8] = b"herd-scout/ssh/1";
 /// big-endian length + JSON body, single round-trip per stream.
 pub const ADMIN_ALPN: &[u8] = b"herd-scout/admin/1";
 
+/// ALPN for the daemon's batch video upload + processing plane.
+///
+/// Fifth ALPN registered on the daemon's iroh `Router` (after
+/// moq-live, gossip, [`CONTROL_ALPN`], and [`ADMIN_ALPN`]). Authorized
+/// peers (entries in `[control_plane.admins]`) open a bi-directional
+/// QUIC stream and speak length-prefixed JSON [`UploadClientMsg`] /
+/// [`UploadServerMsg`] framing. The clip bytes ride iroh-blobs over
+/// the same iroh node — the JSON message wraps the BLAKE3 hash plus
+/// metadata; the daemon `get`s the blob via the existing iroh-blobs
+/// store.
+///
+/// Versioned the same way [`CONTROL_ALPN`] / [`ADMIN_ALPN`] are.
+pub const UPLOAD_ALPN: &[u8] = b"herd-scout/upload/1";
+
 /// One entry in the daemon's SSH allowlist. `node_id` is a canonical
 /// `EndpointId` string; `label` is human-readable and may be empty
 /// (legacy entries that pre-date the labeled-schema migration).
@@ -91,6 +105,92 @@ pub struct AuditRecord {
     pub actor_label: Option<String>,
     #[serde(default)]
     pub details: serde_json::Value,
+}
+
+/// Lifecycle of a queued upload. Surfaced to the GUI via
+/// [`ServerMsg::UploadStatus`] and to admin clients via
+/// [`UploadServerMsg::QueueSnapshot`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UploadState {
+    Queued,
+    Decoding,
+    Done,
+    Failed { reason: String },
+}
+
+/// One row in the upload queue. The BLAKE3 hash is the canonical id;
+/// `filename` is human-readable and may collide across uploads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadEntry {
+    pub blake3_hex: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub state: UploadState,
+    pub queued_ts_ms: u64,
+    #[serde(default)]
+    pub started_ts_ms: Option<u64>,
+    #[serde(default)]
+    pub finished_ts_ms: Option<u64>,
+}
+
+/// Headline numbers from a finished clip's `report.json`. Inlined in
+/// [`ServerMsg::UploadStatus`] so the GUI can render the queue panel
+/// without a second round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadSummaryInline {
+    pub median_active_count_total: u32,
+    pub bootstrap_ci_95_total: [u32; 2],
+    pub horse: u32,
+    pub sheep: u32,
+    pub cow: u32,
+    pub frame_count: u32,
+    pub duration_ms: u64,
+}
+
+/// Phase 2 upload-plane requests (admin client → daemon over [`UPLOAD_ALPN`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UploadClientMsg {
+    /// Announce a clip the client has already imported into iroh-blobs
+    /// under `blake3_hex`. The daemon `get`s the blob, stages it
+    /// under `<data_dir>/uploads/<blake3>/`, and queues processing.
+    /// Replies with [`UploadServerMsg::Accepted`] or one of the
+    /// `Rejected*` variants.
+    Push {
+        filename: String,
+        size_bytes: u64,
+        blake3_hex: String,
+    },
+    /// Return the current queue snapshot (pending + recently
+    /// finished entries; daemon decides retention).
+    ListQueue,
+    /// Drop a queued (not-yet-`Decoding`) entry. No-op if the entry
+    /// is not in the queue or already past `Queued`.
+    CancelQueued { blake3_hex: String },
+    /// Read the persisted `report.json` for a finished clip.
+    FetchReport { blake3_hex: String },
+}
+
+/// Phase 2 upload-plane replies (daemon → admin client).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UploadServerMsg {
+    Accepted { blake3_hex: String },
+    RejectedTooBig { actual_bytes: u64, max_bytes: u64 },
+    RejectedHashMismatch { reported: String, computed: String },
+    QueueSnapshot { entries: Vec<UploadEntry> },
+    /// Body is the raw bytes of the clip's `report.json`. Wrapped in
+    /// a `Vec<u8>` (base64 on the wire — reuses the
+    /// [`ServerMsg::Frame`] base64 helper) so the daemon doesn't need
+    /// to parse and re-serialize.
+    Report {
+        blake3_hex: String,
+        #[serde(with = "base64_bytes")]
+        json_bytes: Vec<u8>,
+    },
+    Ok,
+    Error { code: String, message: String },
 }
 
 /// Wave 12 admin-plane requests (phone → daemon).
@@ -250,6 +350,10 @@ pub enum ServerMsg {
         width: u16,
         height: u16,
         pts_ms: u64,
+        /// `Some(blake3_hex)` when this frame originates from an
+        /// upload-replay; `None` for live phone broadcast frames.
+        #[serde(default)]
+        clip_id: Option<String>,
         #[serde(with = "base64_bytes")]
         jpeg: Vec<u8>,
     },
@@ -258,6 +362,25 @@ pub enum ServerMsg {
         frame_pts_ms: u64,
         dets: Vec<DetWire>,
         counts: ClassCountsWire,
+        /// `Some(blake3_hex)` when these detections originate from an
+        /// upload-replay; `None` for live phone broadcast frames.
+        #[serde(default)]
+        clip_id: Option<String>,
+    },
+    /// Lifecycle update for a queued upload. The GUI uses this to
+    /// drive the "Uploads" side panel.
+    UploadStatus {
+        blake3_hex: String,
+        filename: String,
+        state: UploadState,
+        progress_pct: u8,
+        #[serde(default)]
+        eta_ms: Option<u64>,
+        /// Inlined headline from the persisted report; populated only
+        /// when `state == Done`. Clients that want full detail call
+        /// [`UploadClientMsg::FetchReport`].
+        #[serde(default)]
+        summary: Option<UploadSummaryInline>,
     },
     /// CV banner state (e.g. "CV disabled: shape mismatch"). Empty
     /// `text` and `disabled = false` clears the banner.
@@ -292,6 +415,21 @@ pub enum ClientMsg {
     CancelStream,
     /// Ask the daemon to shut down (graceful — actor drains).
     Shutdown,
+    /// GUI → daemon: stage a local file for upload. The daemon
+    /// imports the bytes into iroh-blobs locally (no network) and
+    /// kicks off the upload pipeline as if it had received the file
+    /// over [`UPLOAD_ALPN`]. `path` must be readable by the daemon
+    /// process; co-located GUI + daemon is the typical case. The
+    /// daemon will reply via the existing `ServerMsg::UploadStatus`
+    /// stream.
+    UploadHandoff {
+        path: String,
+        blake3_hex: String,
+        size_bytes: u64,
+    },
+    /// GUI → daemon: cancel a queued upload by BLAKE3 hex prefix
+    /// (full hash; truncation is a GUI-side affordance).
+    UploadCancel { blake3_hex: String },
 }
 
 mod base64_bytes {
@@ -395,6 +533,7 @@ mod tests {
             width: 1280,
             height: 720,
             pts_ms: 12345,
+            clip_id: None,
             jpeg: raw.clone(),
         };
         let s = serde_json::to_string(&msg).unwrap();
@@ -471,6 +610,348 @@ mod tests {
                 assert_eq!(r.daemon_version, "0.1.0");
                 assert_eq!(r.active_ssh_sessions, 2);
                 assert_eq!(r.last_reload_source, "boot");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn upload_client_msg_roundtrips() {
+        let cases = [
+            UploadClientMsg::Push {
+                filename: "drone-flyover.mp4".into(),
+                size_bytes: 12_345_678,
+                blake3_hex: "9c2f".repeat(16),
+            },
+            UploadClientMsg::ListQueue,
+            UploadClientMsg::CancelQueued {
+                blake3_hex: "9c2f".repeat(16),
+            },
+            UploadClientMsg::FetchReport {
+                blake3_hex: "9c2f".repeat(16),
+            },
+        ];
+        for msg in cases {
+            let s = serde_json::to_string(&msg).unwrap();
+            let parsed: UploadClientMsg = serde_json::from_str(&s).unwrap();
+            assert_eq!(format!("{msg:?}"), format!("{parsed:?}"));
+        }
+    }
+
+    #[test]
+    fn upload_server_msg_accepted_roundtrips() {
+        let msg = UploadServerMsg::Accepted {
+            blake3_hex: "ab".repeat(32),
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: UploadServerMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            UploadServerMsg::Accepted { blake3_hex } => {
+                assert_eq!(blake3_hex, "ab".repeat(32));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn upload_server_msg_rejected_too_big_roundtrips() {
+        let msg = UploadServerMsg::RejectedTooBig {
+            actual_bytes: 3_000_000_000,
+            max_bytes: 2_147_483_648,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: UploadServerMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            UploadServerMsg::RejectedTooBig {
+                actual_bytes,
+                max_bytes,
+            } => {
+                assert_eq!(actual_bytes, 3_000_000_000);
+                assert_eq!(max_bytes, 2_147_483_648);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn upload_server_msg_rejected_hash_mismatch_roundtrips() {
+        let msg = UploadServerMsg::RejectedHashMismatch {
+            reported: "aa".repeat(32),
+            computed: "bb".repeat(32),
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: UploadServerMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            UploadServerMsg::RejectedHashMismatch { reported, computed } => {
+                assert_eq!(reported, "aa".repeat(32));
+                assert_eq!(computed, "bb".repeat(32));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn upload_server_msg_queue_snapshot_roundtrips() {
+        let entry = UploadEntry {
+            blake3_hex: "9c2f".repeat(16),
+            filename: "clip.mp4".into(),
+            size_bytes: 1024,
+            state: UploadState::Queued,
+            queued_ts_ms: 1_717_000_000_000,
+            started_ts_ms: None,
+            finished_ts_ms: None,
+        };
+        let msg = UploadServerMsg::QueueSnapshot {
+            entries: vec![entry.clone()],
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: UploadServerMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            UploadServerMsg::QueueSnapshot { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].blake3_hex, entry.blake3_hex);
+                assert_eq!(entries[0].filename, "clip.mp4");
+                assert_eq!(entries[0].state, UploadState::Queued);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn upload_server_msg_report_roundtrips() {
+        let raw = br#"{"schema_version":1,"clip_id":"abc"}"#.to_vec();
+        let msg = UploadServerMsg::Report {
+            blake3_hex: "9c2f".repeat(16),
+            json_bytes: raw.clone(),
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: UploadServerMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            UploadServerMsg::Report {
+                blake3_hex,
+                json_bytes,
+            } => {
+                assert_eq!(blake3_hex, "9c2f".repeat(16));
+                assert_eq!(json_bytes, raw);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn upload_server_msg_ok_and_error_roundtrip() {
+        let s = serde_json::to_string(&UploadServerMsg::Ok).unwrap();
+        match serde_json::from_str::<UploadServerMsg>(&s).unwrap() {
+            UploadServerMsg::Ok => {}
+            _ => panic!("wrong variant"),
+        }
+
+        let msg = UploadServerMsg::Error {
+            code: "hash_mismatch".into(),
+            message: "computed != reported".into(),
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        match serde_json::from_str::<UploadServerMsg>(&s).unwrap() {
+            UploadServerMsg::Error { code, message } => {
+                assert_eq!(code, "hash_mismatch");
+                assert_eq!(message, "computed != reported");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_upload_status_queued_roundtrips() {
+        let msg = ServerMsg::UploadStatus {
+            blake3_hex: "9c2f".repeat(16),
+            filename: "clip.mp4".into(),
+            state: UploadState::Queued,
+            progress_pct: 0,
+            eta_ms: None,
+            summary: None,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            ServerMsg::UploadStatus {
+                state, progress_pct, ..
+            } => {
+                assert_eq!(state, UploadState::Queued);
+                assert_eq!(progress_pct, 0);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_upload_status_decoding_roundtrips() {
+        let msg = ServerMsg::UploadStatus {
+            blake3_hex: "9c2f".repeat(16),
+            filename: "clip.mp4".into(),
+            state: UploadState::Decoding,
+            progress_pct: 42,
+            eta_ms: Some(15_000),
+            summary: None,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            ServerMsg::UploadStatus {
+                state,
+                progress_pct,
+                eta_ms,
+                ..
+            } => {
+                assert_eq!(state, UploadState::Decoding);
+                assert_eq!(progress_pct, 42);
+                assert_eq!(eta_ms, Some(15_000));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_upload_status_done_roundtrips() {
+        let summary = UploadSummaryInline {
+            median_active_count_total: 47,
+            bootstrap_ci_95_total: [44, 51],
+            horse: 0,
+            sheep: 0,
+            cow: 47,
+            frame_count: 2624,
+            duration_ms: 87_520,
+        };
+        let msg = ServerMsg::UploadStatus {
+            blake3_hex: "9c2f".repeat(16),
+            filename: "clip.mp4".into(),
+            state: UploadState::Done,
+            progress_pct: 100,
+            eta_ms: None,
+            summary: Some(summary),
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            ServerMsg::UploadStatus {
+                state,
+                progress_pct,
+                summary,
+                ..
+            } => {
+                assert_eq!(state, UploadState::Done);
+                assert_eq!(progress_pct, 100);
+                let s = summary.expect("summary should be present");
+                assert_eq!(s.median_active_count_total, 47);
+                assert_eq!(s.bootstrap_ci_95_total, [44, 51]);
+                assert_eq!(s.cow, 47);
+                assert_eq!(s.frame_count, 2624);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_upload_handoff_roundtrips() {
+        let msg = ClientMsg::UploadHandoff {
+            path: "/tmp/clip.mp4".into(),
+            blake3_hex: "9c2f".repeat(16),
+            size_bytes: 12_345_678,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            ClientMsg::UploadHandoff {
+                path,
+                blake3_hex,
+                size_bytes,
+            } => {
+                assert_eq!(path, "/tmp/clip.mp4");
+                assert_eq!(blake3_hex, "9c2f".repeat(16));
+                assert_eq!(size_bytes, 12_345_678);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_upload_cancel_roundtrips() {
+        let msg = ClientMsg::UploadCancel {
+            blake3_hex: "9c2f".repeat(16),
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMsg = serde_json::from_str(&s).unwrap();
+        match parsed {
+            ClientMsg::UploadCancel { blake3_hex } => {
+                assert_eq!(blake3_hex, "9c2f".repeat(16));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn legacy_frame_without_clip_id_still_deserializes() {
+        // Old wire format: no `clip_id` field. `#[serde(default)]`
+        // must deserialize this cleanly into `ServerMsg::Frame` with
+        // `clip_id == None`.
+        let legacy = r#"{
+            "type": "frame",
+            "width": 1280,
+            "height": 720,
+            "pts_ms": 12345,
+            "jpeg": "AAEC"
+        }"#;
+        let parsed: ServerMsg = serde_json::from_str(legacy).unwrap();
+        match parsed {
+            ServerMsg::Frame {
+                width,
+                height,
+                pts_ms,
+                clip_id,
+                jpeg,
+            } => {
+                assert_eq!(width, 1280);
+                assert_eq!(height, 720);
+                assert_eq!(pts_ms, 12345);
+                assert_eq!(clip_id, None);
+                assert_eq!(jpeg, vec![0u8, 1, 2]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn legacy_detections_without_clip_id_still_deserializes() {
+        // Sibling of `legacy_frame_without_clip_id_still_deserializes`.
+        // Old wire format: no `clip_id` field on `Detections`.
+        // `#[serde(default)]` must deserialize this cleanly into
+        // `ServerMsg::Detections` with `clip_id == None`.
+        let legacy = r#"{
+            "type": "detections",
+            "frame_pts_ms": 4242,
+            "dets": [
+                {
+                    "class": 2,
+                    "bbox": [10.0, 20.0, 110.0, 120.0],
+                    "score": 0.91,
+                    "track_id": 7
+                }
+            ],
+            "counts": { "horse": 0, "sheep": 0, "cow": 1 }
+        }"#;
+        let parsed: ServerMsg = serde_json::from_str(legacy).unwrap();
+        match parsed {
+            ServerMsg::Detections {
+                frame_pts_ms,
+                dets,
+                counts,
+                clip_id,
+            } => {
+                assert_eq!(frame_pts_ms, 4242);
+                assert_eq!(dets.len(), 1);
+                assert_eq!(dets[0].class, 2);
+                assert_eq!(dets[0].track_id, Some(7));
+                assert_eq!(counts.cow, 1);
+                assert_eq!(clip_id, None);
             }
             _ => panic!("wrong variant"),
         }
