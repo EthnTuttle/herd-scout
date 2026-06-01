@@ -15,6 +15,8 @@ pub mod cv;
 pub mod upload;
 
 pub mod audit;
+#[cfg(feature = "rekor-mirror")]
+pub mod audit_mirror;
 pub mod control;
 pub mod ipc;
 pub mod admin;

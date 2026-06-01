@@ -165,6 +165,48 @@ the allowlist and lock yourself out of the iroh path. Keep ufw set to
 allow SSH on the LAN side per
 `.wiki/output/plan-deploy-daemon-on-1060-laptop-2026-05-22` Phase 1.
 
+### Identity threat model
+
+The gates above assume the daemon's iroh `SecretKey` stays on the
+laptop. It is persisted as a plain file at
+`~/.local/share/herd-scout/iroh_secret` (mode `0600`, owned by the
+daemon user). Anyone who can read that file — an SD-card clone, a
+filesystem-level backup of `/var/lib`-style state, an offline disk
+extraction, or a misconfigured rsync — can stand up a process that
+impersonates the daemon to every peer in the allowlist. The NodeId is
+the identity; possession of the secret *is* the daemon.
+
+Mitigations operators should layer:
+
+- **Filesystem access control.** The secret is mode `0600` on first
+  write; keep the daemon user's `$HOME` mode `0700` so other local
+  users can't traverse in. Full-disk encryption (LUKS on the root
+  volume, or the laptop's firmware-managed equivalent) defeats offline
+  disk / SD-card extraction when the box is powered off.
+- **No backups of the secret.** Explicitly exclude
+  `~/.local/share/herd-scout/iroh_secret` from any backup tooling
+  (restic, borg, rsnapshot, cloud sync, image-level snapshots). A
+  backup of the identity *is* a clone of the daemon. If the secret is
+  lost to disk failure, rotate per the **Rotating the daemon's
+  identity** procedure above (lines 73-77) — peers re-pin the new
+  NodeId, which is the intended cost.
+- **Hardware sealing (roadmap, not yet implemented).** The right
+  long-term answer is sealing the secret to non-cloneable hardware
+  (TPM-backed key, SoC unique ID, fuse-burned secret) the way Mender's
+  `mender-device-identity` does, so a disk image alone can't
+  reconstruct the identity. On x86 deployments this would be
+  TPM-backed; the Android equivalent is the Keystore HAL. Captured as
+  a known gap — see the edge-fleet operational-patterns research at
+  `~/wiki/topics/rust-multi-platform/wiki/concepts/`. No delivery
+  date.
+
+**Rotation is the response to suspected compromise.** If you have any
+reason to believe the secret has been read off disk, follow the
+rotation steps at lines 73-77: stop the daemon, delete
+`~/.local/share/herd-scout/iroh_secret`, restart, and re-distribute
+the new NodeId to every peer. The old NodeId becomes inert the moment
+no daemon holds the matching secret.
+
 ### Concurrent session cap
 
 The handler caps simultaneous bridges at 16
@@ -276,6 +318,59 @@ partial failure.
 Up to 10 saved daemons in the phone's `SharedPreferences`. Exactly one
 iroh `Connection` is open at a time — switching daemons closes the
 prior session and dials the new one. No multiplexing.
+
+## Optional: Sigstore Rekor audit-log mirror (PROTOTYPE, opt-in)
+
+Mirror periodic commitments of `audit.log` to the public Sigstore Rekor
+log so an external observer can detect split-view tampering. Off by
+default. Privacy-preserving: only SHA-256 commitments and the daemon's
+existing public NodeId reach the public log; no audit-record contents
+leave the device.
+
+Each anchor commits to the previous anchor's Rekor UUID, so anchors
+form their own append-only chain that an auditor can walk through Rekor
+independently of the daemon. Anchor records (`kind = audit_mirror_anchor`)
+are themselves written back into `audit.log` and pulled into the next
+batch — anchors anchor themselves on the next flush.
+
+1. Build with the feature:
+   ```sh
+   cargo build --release -p herd-scout-daemon --features rekor-mirror
+   ```
+2. Add to `<config_dir>/herd-scout/control.toml`:
+   ```toml
+   [audit_mirror]
+   enabled = true
+   batch_size = 100             # flush every N records
+   flush_interval_secs = 3600   # …or hourly, whichever first
+   rekor_url = "https://rekor.sigstore.dev"
+   ```
+3. SIGHUP to reload (or restart). Watch `journalctl -u herd-scout-daemon`
+   for `audit_mirror: anchored uuid=… log_index=…` lines, or grep
+   `audit_mirror_anchor` in `audit.log`.
+
+Verify any anchor independently:
+
+```sh
+curl -s "https://rekor.sigstore.dev/api/v1/log/entries/$UUID" | jq .
+```
+
+The signed `data.hash.value` is `sha256(canonical_manifest)`; the
+manifest itself isn't on the public log, so an auditor needs both the
+local `audit.log` and the Rekor entry to reconstruct the proof.
+
+Caveats — PROTOTYPE:
+
+- A daemon restart with un-flushed records loses those records from the
+  chain. Flushed anchors are durable.
+- Network outages buffer in memory only; backoff caps at 5 min and
+  retries indefinitely.
+- The daemon's NodeId is published on a permanently-archived public log.
+  It's already gossiped to peers, but Rekor archival is a different
+  privacy property — disable if your fleet has any concern.
+- No periodic Rekor read-back / witness verification yet. Tampering is
+  detectable by an external auditor walking the chain; the daemon does
+  not currently self-verify its own anchor chain.
 
 ## systemd units
 

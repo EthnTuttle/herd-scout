@@ -29,6 +29,52 @@ use tracing::{debug, info, warn};
 use super::config::ControlConfig;
 use crate::audit::{Audit, ControlMetrics};
 
+/// Build the `AccessLimit` predicate for the SSH/control ALPN.
+///
+/// Wave 14 refactor: the allowlist + self-dial gate moved out of
+/// `ControlHandler::accept` so iroh can short-circuit unauthorized
+/// dials at the router layer (`AccessLimit::new`). The predicate is
+/// `Fn(EndpointId) -> bool` (not `FnMut`), so it must capture by
+/// `Arc`/`Clone`. Rejection audit lines (`ssh_rejected` with
+/// `reason: "self_dial" | "not_in_allowed"`) are now fire-and-forget
+/// via `tokio::spawn` — accepted regression: a runtime-shutdown race
+/// drops the future quietly.
+///
+/// The `MAX_SESSIONS` cap stays inside the handler (it's stateful and
+/// can't be expressed as a stateless predicate); its `ssh_rejected`
+/// audit line with `reason: "max_sessions"` is unchanged.
+pub fn allowlist_predicate(
+    cfg: Arc<ArcSwap<ControlConfig>>,
+    own_node_id: EndpointId,
+    audit: Audit,
+) -> impl Fn(EndpointId) -> bool + Send + Sync + 'static {
+    move |remote: EndpointId| {
+        let snapshot = cfg.load();
+        let is_self = remote == own_node_id;
+        let in_allowed = snapshot.allowed_node_ids.contains(&remote);
+        if is_self || !in_allowed {
+            warn!(
+                remote = %remote.fmt_short(),
+                "control: dropping unauthorized dial",
+            );
+            let audit = audit.clone();
+            let reason = if is_self { "self_dial" } else { "not_in_allowed" };
+            tokio::spawn(async move {
+                audit
+                    .log(
+                        "ssh_rejected",
+                        Some(remote.to_string()),
+                        None,
+                        json!({ "reason": reason }),
+                    )
+                    .await;
+            });
+            return false;
+        }
+        true
+    }
+}
+
 /// Hard ceiling on simultaneous SSH bridges. Decision 4 picks a number
 /// large enough to keep "one user, many tabs" usable but small enough
 /// that a misbehaving peer can't exhaust the daemon's fds.
@@ -37,7 +83,6 @@ const MAX_SESSIONS: usize = 16;
 #[derive(Debug, Clone)]
 pub struct ControlHandler {
     cfg: Arc<ArcSwap<ControlConfig>>,
-    own_node_id: EndpointId,
     metrics: Arc<ControlMetrics>,
     audit: Audit,
 }
@@ -45,13 +90,11 @@ pub struct ControlHandler {
 impl ControlHandler {
     pub fn new(
         cfg: Arc<ArcSwap<ControlConfig>>,
-        own_node_id: EndpointId,
         metrics: Arc<ControlMetrics>,
         audit: Audit,
     ) -> Self {
         Self {
             cfg,
-            own_node_id,
             metrics,
             audit,
         }
@@ -83,30 +126,10 @@ impl ProtocolHandler for ControlHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let remote = connection.remote_id();
 
-        // Allowlist + self-dial gate. fail-closed: empty allowlist drops
-        // everything.
+        // Allowlist + self-dial gate runs in `allowlist_predicate` via
+        // `AccessLimit` (registered in `main.rs`). When this method is
+        // entered, the connection has already been authorized.
         let cfg = self.cfg.load();
-        if remote == self.own_node_id || !cfg.allowed_node_ids.contains(&remote) {
-            warn!(
-                remote = %remote.fmt_short(),
-                "control: dropping unauthorized dial",
-            );
-            self.audit
-                .log(
-                    "ssh_rejected",
-                    Some(remote.to_string()),
-                    None,
-                    json!({
-                        "reason": if remote == self.own_node_id {
-                            "self_dial"
-                        } else {
-                            "not_in_allowed"
-                        },
-                    }),
-                )
-                .await;
-            return Ok(());
-        }
 
         // Concurrency cap (Decision 4). fetch_add returns the *previous*
         // value, so we admit when the post-increment count is <= MAX.

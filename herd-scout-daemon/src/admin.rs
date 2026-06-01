@@ -12,4 +12,4 @@
 
 mod handler;
 
-pub use handler::AdminHandler;
+pub use handler::{AdminHandler, admins_predicate};

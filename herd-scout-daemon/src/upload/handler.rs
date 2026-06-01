@@ -27,6 +27,7 @@ use arc_swap::ArcSwap;
 use herd_scout_ipc::{
     ServerMsg, UploadClientMsg, UploadEntry, UploadServerMsg, UploadState,
 };
+use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use serde_json::json;
@@ -42,6 +43,47 @@ use crate::audit::Audit;
 use crate::control::ControlConfig;
 use crate::ipc::frame;
 
+/// Build the `AccessLimit` predicate for the upload ALPN.
+///
+/// Wave 14 refactor: the admins-set membership check moved out of
+/// `UploadHandler::accept` into iroh's router-layer
+/// `AccessLimit::new`. The pre-refactor handler did **not** include
+/// a self-dial check (the daemon doesn't dial its own UPLOAD_ALPN);
+/// we preserve that behavior — the predicate is membership-only.
+/// Rejection audit lines (`upload_rejected` with
+/// `reason: "not_in_admins"`) are now fire-and-forget via
+/// `tokio::spawn` — accepted regression: a runtime-shutdown race may
+/// drop the audit-log future. The `MAX_UPLOAD_BYTES` and
+/// `hash_mismatch` audit lines stay inside the handler (they're per-
+/// RPC outcomes, not gate decisions).
+pub fn admins_predicate(
+    cfg: Arc<ArcSwap<ControlConfig>>,
+    audit: Audit,
+) -> impl Fn(EndpointId) -> bool + Send + Sync + 'static {
+    move |remote: EndpointId| {
+        let snapshot = cfg.load();
+        if !snapshot.admins.contains(&remote) {
+            warn!(
+                remote = %remote.fmt_short(),
+                "upload: dropping unauthorized dial",
+            );
+            let audit = audit.clone();
+            tokio::spawn(async move {
+                audit
+                    .log(
+                        "upload_rejected",
+                        Some(remote.to_string()),
+                        None,
+                        json!({ "reason": "not_in_admins" }),
+                    )
+                    .await;
+            });
+            return false;
+        }
+        true
+    }
+}
+
 /// QUIC stream chunk size used while streaming bytes into the stager.
 /// 64 KiB matches typical kernel socket buffers and is small enough to
 /// keep the BLAKE3 hasher's working set in L1 cache.
@@ -51,7 +93,6 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 /// behind `Arc`s.
 #[derive(Debug, Clone)]
 pub struct UploadHandler {
-    cfg: Arc<ArcSwap<ControlConfig>>,
     audit: Audit,
     queue: Queue,
     uploads_dir: PathBuf,
@@ -60,14 +101,12 @@ pub struct UploadHandler {
 
 impl UploadHandler {
     pub fn new(
-        cfg: Arc<ArcSwap<ControlConfig>>,
         audit: Audit,
         queue: Queue,
         uploads_dir: PathBuf,
         server_tx: broadcast::Sender<ServerMsg>,
     ) -> Self {
         Self {
-            cfg,
             audit,
             queue,
             uploads_dir,
@@ -369,31 +408,9 @@ impl ProtocolHandler for UploadHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let remote = connection.remote_id();
 
-        // Allowlist gate. Empty admins set = closed to all (same shape
-        // as `admin/handler.rs`'s gate). Self-dial rejected as a safety
-        // measure.
-        {
-            let cfg = self.cfg.load();
-            // The daemon's own NodeId isn't available here without
-            // threading it through; since admins are explicit and
-            // self-loops would require the daemon to dial its own
-            // ALPN (which it doesn't), the membership check is enough.
-            if !cfg.admins.contains(&remote) {
-                warn!(
-                    remote = %remote.fmt_short(),
-                    "upload: dropping unauthorized dial",
-                );
-                self.audit
-                    .log(
-                        "upload_rejected",
-                        Some(remote.to_string()),
-                        None,
-                        json!({ "reason": "not_in_admins" }),
-                    )
-                    .await;
-                return Ok(());
-            }
-        }
+        // Admins-membership gate runs in `admins_predicate` via
+        // `AccessLimit` (registered in `main.rs`). When this method is
+        // entered, the connection has already been authorized.
 
         let (mut send, mut recv) = match connection.accept_bi().await {
             Ok(streams) => streams,

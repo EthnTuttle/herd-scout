@@ -24,6 +24,8 @@
 // binary. Bin-only modules (everything that doesn't need to be
 // reachable from `upload`) stay declared here.
 use herd_scout_daemon::{admin, audit, control, cv, ipc, upload};
+#[cfg(feature = "rekor-mirror")]
+use herd_scout_daemon::audit_mirror;
 mod daemon_secret;
 mod pairing;
 mod preview;
@@ -114,6 +116,39 @@ async fn main() -> Result<()> {
                 .expect("temp_dir audit fallback")
         }
     };
+    // Wave 14 prototype (feature-gated): wire the Rekor-mirror task to
+    // the audit log so periodic Merkle-root commitments reach the
+    // public Sigstore log. Off by default; enable via
+    // `--features rekor-mirror` AND `[audit_mirror].enabled = true` in
+    // control.toml.
+    #[cfg(feature = "rekor-mirror")]
+    {
+        let mirror_cfg =
+            audit_mirror::load_from_control_toml(&control::config_path());
+        if mirror_cfg.enabled {
+            // Re-derive the daemon SecretKey from the IROH_SECRET env
+            // var that `daemon_secret::ensure_iroh_secret_persisted`
+            // just set. Doing it this way avoids changing the public
+            // API of `daemon_secret`.
+            match std::env::var("IROH_SECRET")
+                .ok()
+                .and_then(|s| decode_hex_secret(&s).ok())
+            {
+                Some(secret) => {
+                    if let Some(tx) =
+                        audit_mirror::spawn(mirror_cfg, secret, audit_log.clone())
+                    {
+                        audit_log.set_mirror_tx(tx);
+                        info!("audit_mirror: wired to audit log");
+                    }
+                }
+                None => warn!(
+                    "audit_mirror: enabled but no IROH_SECRET available; mirror NOT started",
+                ),
+            }
+        }
+    }
+
     metrics.record_reload("boot");
     audit_log
         .log(
@@ -131,7 +166,6 @@ async fn main() -> Result<()> {
     control::spawn_sighup_reloader(control_cfg.clone(), metrics.clone(), audit_log.clone());
     let control_handler = control::ControlHandler::new(
         control_cfg.clone(),
-        own_node_id,
         metrics.clone(),
         audit_log.clone(),
     );
@@ -169,7 +203,6 @@ async fn main() -> Result<()> {
     let (server_tx, _) = broadcast::channel::<ServerMsg>(256);
 
     let upload_handler = upload::handler::UploadHandler::new(
-        control_cfg.clone(),
         audit_log.clone(),
         upload_queue.clone(),
         uploads_dir.clone(),
@@ -180,11 +213,42 @@ async fn main() -> Result<()> {
     // SSH-bridge ALPN (Wave 11), the admin RPC ALPN (Wave 12), and the
     // upload ALPN (Wave 13). The Router is kept alive for the lifetime
     // of `main` — dropping it aborts the accept loop.
+    //
+    // Wave 14: each ALPN's allowlist gate runs at the router layer via
+    // `iroh::protocol::AccessLimit` so unauthorized dials are closed
+    // with `(0, b"not allowed")` before our handler is invoked.
+    // Rejection audit lines (`ssh_rejected`, `admin_rejected`,
+    // `upload_rejected`) are emitted fire-and-forget from inside the
+    // sync predicate via `tokio::spawn` — the accepted regression is
+    // that a runtime-shutdown race may drop the audit-log future.
+    let ssh_gate = control::ssh_allowlist_predicate(
+        control_cfg.clone(),
+        own_node_id,
+        audit_log.clone(),
+    );
+    let admin_gate = admin::admins_predicate(
+        control_cfg.clone(),
+        own_node_id,
+        audit_log.clone(),
+    );
+    let upload_gate = upload::handler::admins_predicate(
+        control_cfg.clone(),
+        audit_log.clone(),
+    );
     let router = live
         .register_protocols(iroh::protocol::Router::builder(endpoint))
-        .accept(herd_scout_ipc::CONTROL_ALPN, control_handler)
-        .accept(herd_scout_ipc::ADMIN_ALPN, admin_handler)
-        .accept(herd_scout_ipc::UPLOAD_ALPN, upload_handler.clone())
+        .accept(
+            herd_scout_ipc::CONTROL_ALPN,
+            iroh::protocol::AccessLimit::new(control_handler, ssh_gate),
+        )
+        .accept(
+            herd_scout_ipc::ADMIN_ALPN,
+            iroh::protocol::AccessLimit::new(admin_handler, admin_gate),
+        )
+        .accept(
+            herd_scout_ipc::UPLOAD_ALPN,
+            iroh::protocol::AccessLimit::new(upload_handler.clone(), upload_gate),
+        )
         .spawn();
     info!(
         id = %live.endpoint().id().fmt_short(),
@@ -430,6 +494,20 @@ fn parse_ticket_arg() -> Option<LiveTicket> {
             None
         }
     }
+}
+
+#[cfg(feature = "rekor-mirror")]
+fn decode_hex_secret(s: &str) -> anyhow::Result<iroh::SecretKey> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.len() != 64 {
+        anyhow::bail!("IROH_SECRET must be 64 hex chars");
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|e| anyhow::anyhow!("hex parse: {e}"))?;
+    }
+    Ok(iroh::SecretKey::from_bytes(&out))
 }
 
 fn cli_ticket() -> Option<String> {

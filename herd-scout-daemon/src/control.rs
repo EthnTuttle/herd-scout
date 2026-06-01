@@ -11,7 +11,7 @@ mod config;
 mod handler;
 
 pub use config::{ControlConfig, config_path, load_or_default, write_atomic};
-pub use handler::ControlHandler;
+pub use handler::{ControlHandler, allowlist_predicate as ssh_allowlist_predicate};
 
 use std::sync::Arc;
 

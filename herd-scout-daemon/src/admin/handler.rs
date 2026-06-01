@@ -27,6 +27,47 @@ use crate::audit::{Audit, ControlMetrics};
 use crate::control::{ControlConfig, write_atomic};
 use crate::ipc::frame;
 
+/// Build the `AccessLimit` predicate for the admin RPC ALPN.
+///
+/// Wave 14 refactor: the admins-set membership + self-dial gate moved
+/// out of `AdminHandler::accept` into iroh's router-layer
+/// `AccessLimit::new`. Rejection audit lines (`admin_rejected` with
+/// `reason: "self_dial" | "not_in_admins"`) are now fire-and-forget
+/// via `tokio::spawn` — accepted regression: a runtime-shutdown race
+/// may drop the audit-log future. The per-RPC `would_orphan_daemon`
+/// guard inside `apply_mutation` stays untouched.
+pub fn admins_predicate(
+    cfg: Arc<ArcSwap<ControlConfig>>,
+    own_node_id: EndpointId,
+    audit: Audit,
+) -> impl Fn(EndpointId) -> bool + Send + Sync + 'static {
+    move |remote: EndpointId| {
+        let snapshot = cfg.load();
+        let is_self = remote == own_node_id;
+        let in_admins = snapshot.admins.contains(&remote);
+        if is_self || !in_admins {
+            warn!(
+                remote = %remote.fmt_short(),
+                "admin: dropping unauthorized dial",
+            );
+            let audit = audit.clone();
+            let reason = if is_self { "self_dial" } else { "not_in_admins" };
+            tokio::spawn(async move {
+                audit
+                    .log(
+                        "admin_rejected",
+                        Some(remote.to_string()),
+                        None,
+                        json!({ "reason": reason }),
+                    )
+                    .await;
+            });
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AdminHandler {
     cfg: Arc<ArcSwap<ControlConfig>>,
@@ -287,31 +328,9 @@ impl ProtocolHandler for AdminHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let remote = connection.remote_id();
 
-        // Allowlist + self-dial gate. Empty admins set = closed to all.
-        {
-            let cfg = self.cfg.load();
-            if remote == self.own_node_id || !cfg.admins.contains(&remote) {
-                warn!(
-                    remote = %remote.fmt_short(),
-                    "admin: dropping unauthorized dial",
-                );
-                self.audit
-                    .log(
-                        "admin_rejected",
-                        Some(remote.to_string()),
-                        None,
-                        json!({
-                            "reason": if remote == self.own_node_id {
-                                "self_dial"
-                            } else {
-                                "not_in_admins"
-                            },
-                        }),
-                    )
-                    .await;
-                return Ok(());
-            }
-        }
+        // Allowlist + self-dial gate runs in `admins_predicate` via
+        // `AccessLimit` (registered in `main.rs`). When this method is
+        // entered, the connection has already been authorized.
 
         // Loop on bi-streams until the peer drops the connection. Each
         // bi-stream carries one request → one reply. The phone reuses

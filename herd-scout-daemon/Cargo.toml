@@ -60,8 +60,22 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 # Cargo.lock so we don't trigger a rebuild of the whole tree.
 blake3 = "1"
 
+# === Rekor mirror (prototype, feature-gated) ===
+# Off by default. Enabled via `--features rekor-mirror`. See
+# `src/audit_mirror.rs` for the design and `deploy/README.md` for the
+# operator opt-in. All deps below are *already* in Cargo.lock as
+# transitives (reqwest via iroh's HTTP relays; sha2 + base64 + ed25519
+# via iroh's TLS / iroh-base; serde via everywhere), so enabling this
+# feature does not pull a fresh subgraph.
+sha2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "json"] }
+ed25519-dalek = { version = "2", optional = true }
+
 [features]
 default = []
+# Mirror periodic audit-log commitments to Sigstore Rekor. PROTOTYPE.
+rekor-mirror = ["dep:sha2", "dep:base64", "dep:reqwest", "dep:ed25519-dalek"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -82,6 +82,12 @@ pub struct Audit {
 struct AuditInner {
     dir: PathBuf,
     file: Mutex<tokio::fs::File>,
+    /// Optional mirror sender (Rekor prototype). Best-effort; installed
+    /// post-`open` via `Audit::set_mirror_tx`. `OnceLock` lets us avoid
+    /// changing `Audit::open` semantics for the default build and lets
+    /// the call site in `main.rs` decide cadence + lifetime.
+    #[cfg(feature = "rekor-mirror")]
+    mirror_tx: std::sync::OnceLock<tokio::sync::mpsc::Sender<AuditRecord>>,
 }
 
 impl Audit {
@@ -97,8 +103,18 @@ impl Audit {
             inner: Arc::new(AuditInner {
                 dir,
                 file: Mutex::new(file),
+                #[cfg(feature = "rekor-mirror")]
+                mirror_tx: std::sync::OnceLock::new(),
             }),
         })
+    }
+
+    /// Install the Rekor-mirror channel sender. Idempotent: a second
+    /// call is silently ignored. Should be called once at startup, after
+    /// `audit_mirror::spawn`.
+    #[cfg(feature = "rekor-mirror")]
+    pub fn set_mirror_tx(&self, tx: tokio::sync::mpsc::Sender<AuditRecord>) {
+        let _ = self.inner.mirror_tx.set(tx);
     }
 
     pub fn dir(&self) -> &Path {
@@ -117,12 +133,25 @@ impl Audit {
             }
         };
         line.push('\n');
-        let mut f = self.inner.file.lock().await;
-        if let Err(e) = f.write_all(line.as_bytes()).await {
-            warn!("audit: write failed: {e:#}");
+        {
+            let mut f = self.inner.file.lock().await;
+            if let Err(e) = f.write_all(line.as_bytes()).await {
+                warn!("audit: write failed: {e:#}");
+            }
         }
         // Skip per-record fsync — accepted tradeoff documented in the
         // module header.
+
+        // Wave 14 prototype: best-effort fan-out to the Rekor mirror.
+        // try_send + drop-on-full so a stalled mirror task can never
+        // block the main append path. The mirror itself filters out
+        // its own `audit_mirror_anchor` records on the consumer side
+        // is unnecessary — anchoring the anchor is cheap and gives
+        // the operator a way to externally verify the chain head.
+        #[cfg(feature = "rekor-mirror")]
+        if let Some(tx) = self.inner.mirror_tx.get() {
+            crate::audit_mirror::try_mirror(tx, &record);
+        }
     }
 
     /// Convenience: build a record stamped now and append it.
