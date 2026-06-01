@@ -30,3 +30,18 @@ Compiled wiki articles. Synthesis from raw sources with cross-references and con
 - [[precision-ag-drone-use-cases]] — relevance matrix for herd-scout
 - [[android-on-drone]] — phone as companion + 4G bridge
 - [[implementation-plan]] — ~$530 phone-on-drone build plan
+
+## Phone-on-drone airframe (Round 4, 2026-06-01)
+
+- [[phone-on-drone-airframe]] — buildable BOM, vibration, mounting, lifetime
+- [[phone-power-on-drone]] — battery life, USB-PD spec, degradation
+- [[phone-thermal-management]] — Thermal API, sustained-perf mode, donor-phone choice
+- [[phone-publisher-android-fgs]] — Android 14/15/16 foreground-service constraints
+
+## Computer vision / counting (Round 4 follow-ups, 2026-06-01)
+
+- [[tracker-choice-bot-oc-byte]] — ByteTrack vs BoT-SORT vs OC-SORT — when to switch
+- [[track-recovery-busca-hit]] — online + offline tracklet recovery
+- [[cattle-reid-self-supervised]] — concrete recipe replacing the ResNet50 stub
+- [[bootstrap-conformal-count-ci]] — block bootstrap, BCa, J+aB
+- [[yolo26-and-tracker-compat]] — YOLO26 retrain + tracker head-choice constraint
