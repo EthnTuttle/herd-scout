@@ -84,6 +84,14 @@ async fn main() -> Result<()> {
     // best-effort until the operator fixes the data dir.
     let fms = open_fms_records().await;
 
+    // Plan-FMS Phase 3: open the SQLite read-projection alongside.
+    // Best-effort — if the projection fails to open the daemon
+    // stays up but `FmsSearchLogs` returns `projection_unavailable`.
+    let fms_projection = match fms.as_ref() {
+        Some(f) => open_fms_projection(f).await,
+        None => None,
+    };
+
     // Bring up the Live endpoint. We hand-build the iroh `Router`
     // ourselves (NOT `with_router()`) so we can mount the Wave 11
     // control-plane ALPN alongside moq + gossip on a single Endpoint.
@@ -594,6 +602,22 @@ async fn main() -> Result<()> {
                     );
                 }
             }
+            ClientMsg::FmsSearchLogs {
+                request_id,
+                query,
+                limit,
+            } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_search_logs(
+                        f,
+                        fms_projection.as_ref(),
+                        &server_tx_ctrl,
+                        request_id,
+                        query,
+                        limit,
+                    );
+                }
+            }
         }
     }
 
@@ -605,6 +629,33 @@ async fn main() -> Result<()> {
     }
     live.shutdown().await;
     Ok(())
+}
+
+/// Plan-FMS Phase 3: opens (or rebuilds) the SQLite read-projection
+/// next to `<data_dir>/fms/`. The path is `<data_dir>/projection.sqlite`.
+/// On every daemon boot the projection is wiped and rebuilt from the
+/// authoritative records.jsonl — see the projection module docs for
+/// the rationale.
+async fn open_fms_projection(
+    fms: &herd_scout_fms::Fms,
+) -> Option<herd_scout_fms::projection::Projection> {
+    let data_dir = match audit::audit_dir() {
+        Ok(p) => p.parent().map(|p| p.to_path_buf()).unwrap_or(p),
+        Err(e) => {
+            warn!("fms_projection: cannot resolve data dir: {e:#}");
+            return None;
+        }
+    };
+    match herd_scout_fms::projection::Projection::open(&data_dir, fms).await {
+        Ok(proj) => {
+            proj.spawn_subscriber(fms);
+            Some(proj)
+        }
+        Err(e) => {
+            warn!("fms_projection: open failed (search disabled): {e:#}");
+            None
+        }
+    }
 }
 
 /// Opens the Plan-FMS records store under the same data dir

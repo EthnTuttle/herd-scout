@@ -15,6 +15,7 @@ use std::str::FromStr;
 use herd_scout_fms::{
     Asset, AssetField as DomainAssetField, AssetKind, BlobRef, Fms, Log, LogKind, Quantity,
 };
+use herd_scout_fms::projection::Projection;
 use herd_scout_ipc::{
     AssetFieldWire, AssetKindWire, AssetWire, AuditRecord, FmsChangeWire, LogKindWire, LogWire,
     QuantityWire, ServerMsg,
@@ -295,6 +296,55 @@ pub fn handle_list_logs_for_asset(
             }
             Err(e) => {
                 let _ = server_tx.send(fms_err(request_id, "list_logs_failed", &e.to_string()));
+            }
+        }
+    });
+}
+
+/// Plan-FMS Phase 3b: full-text search across log notes via the
+/// projection layer. The reply reuses `FmsLogList` so the GUI's
+/// existing log-rendering path can render hits without learning a
+/// new variant; `asset_id` is an empty string to flag "this list
+/// isn't scoped to one asset."
+pub fn handle_search_logs(
+    fms: &Fms,
+    projection: Option<&Projection>,
+    server_tx: &broadcast::Sender<ServerMsg>,
+    request_id: u64,
+    query: String,
+    limit: u32,
+) {
+    let Some(projection) = projection.cloned() else {
+        let _ = server_tx.send(fms_err(
+            request_id,
+            "projection_unavailable",
+            "FMS SQLite projection failed to open at boot",
+        ));
+        return;
+    };
+    let fms = fms.clone();
+    let server_tx = server_tx.clone();
+    tokio::spawn(async move {
+        match projection.search_logs(&query, limit).await {
+            Ok(hits) => {
+                let mut logs = Vec::with_capacity(hits.len());
+                for hit in hits {
+                    match fms.read_log(hit.log_id).await {
+                        Ok(Some(log)) => logs.push(log_wire_out(&log)),
+                        Ok(None) => {} // log was tombstoned between hit and read
+                        Err(e) => {
+                            warn!("projection: hit read failed: {e:#}");
+                        }
+                    }
+                }
+                let _ = server_tx.send(ServerMsg::FmsLogList {
+                    request_id,
+                    asset_id: String::new(),
+                    logs,
+                });
+            }
+            Err(e) => {
+                let _ = server_tx.send(fms_err(request_id, "search_failed", &e.to_string()));
             }
         }
     });

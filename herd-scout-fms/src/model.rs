@@ -346,6 +346,13 @@ fn parse_log_id(key: &[u8]) -> Option<Ulid> {
     id_str.parse().ok()
 }
 
+/// Public form of [`parse_log_id`]; the projection module needs to
+/// enumerate log ids out of raw store records during cold-rebuild.
+#[doc(hidden)]
+pub fn parse_log_id_pub(key: &[u8]) -> Option<Ulid> {
+    parse_log_id(key)
+}
+
 pub fn materialize_log(
     id: Ulid,
     records: &[(String, Vec<u8>, Hlc, Vec<u8>)],

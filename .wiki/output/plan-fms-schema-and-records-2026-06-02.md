@@ -295,22 +295,47 @@ identity envelope and audit-log infrastructure already in the repo;
 the plumbing in this plan stays valid. Phase 5 lands as the
 follow-up wave once that decision is made.
 
-## Phase 3 deferral — execution-time decision (2026-06-02)
+## Phase 3 shipped — daemon-side SQLite projection + FTS5 search (2026-06-02)
 
-After Phases 0-2 landed, the in-memory `BTreeMap` index inside
-`herd-scout-fms`'s `Store` already serves `scan_prefix` and exposes a
-broadcast change stream identical in shape to what the SQLite
-projection would offer. For the realistic v1 dataset (≤1k animals,
-≤10k logs over a year) the in-memory index is faster than SQLite and
-needs zero additional code or schema migrations. Phase 3 is therefore
-**deferred** until either (a) a real-world dataset shows query
-latency ≥ 50ms on a list view, or (b) full-text search across log
-notes becomes a user requirement — at which point an FTS5 mirror is
-straight-line work using the same broadcast channel as the trigger.
-Co-location detection (`HERD_SCOUT_GUI_MODE`) is also deferred for
-the same reason: with no projection to duplicate, there's nothing
-for it to gate. Both surfaces remain documented in this plan;
-they'll land as Phase 3.5 when their costs become real.
+Phase 3 lands as the daemon-only half of the originally-scoped
+work. The "remote-mode GUI runs its own iroh peer" surface is still
+gated on Phase 5 (no cross-device record sync to mirror), so
+co-location detection (`HERD_SCOUT_GUI_MODE`) stays explicitly
+deferred under the same condition: when there's a second peer to
+duplicate, that switch becomes meaningful.
+
+What shipped:
+
+- `herd-scout-fms` gained a `projection` Cargo feature (default-on)
+  pulling in `rusqlite` 0.32 with the bundled SQLite amalgamation
+  (FTS5 enabled by `libsqlite3-sys`'s bundled build).
+- New `herd-scout-fms::projection::Projection` module mirrors every
+  asset/log into `<data_dir>/projection.sqlite` with tables
+  `asset`, `asset_tag`, `log`, `log_asset_ref`, `quantity`, plus a
+  standalone FTS5 virtual table `log_fts(log_id UNINDEXED, notes)`.
+  Projection is wiped + rebuilt from `records.jsonl` on every
+  daemon boot — projection is rebuildable, never the source of
+  truth, so there's no migration story.
+- `Projection::spawn_subscriber` consumes the `Fms` change stream
+  and applies one upsert per `ChangeEvent`. Lagged subscriber →
+  rebuild from the in-memory index; no checkpoint state.
+- New IPC RPC `ClientMsg::FmsSearchLogs { query, limit }` and a
+  daemon dispatcher (`fms_rpc::handle_search_logs`) that runs the
+  FTS5 query through the projection, materializes each hit back
+  through `Fms::read_log`, and replies via the existing
+  `ServerMsg::FmsLogList` (with empty `asset_id` flagging "search"
+  vs "asset-scoped").
+- egui Records tab gained a search box: type a phrase, press
+  Enter or click Search, results render in a 160px scrollable
+  grid. "Clear" wipes the local result cache.
+
+Three projection tests cover FTS round-trip (multi-term match +
+ranking + empty-query early-out), live sync via the change-bridge,
+and rebuild-after-wipe. Workspace test count: 158 (was 155).
+
+Plan deviations preserved: Phase 5 still deferred until durable
+smol-kv lands or the daemon owns records-exchange; the `_GUI_MODE`
+co-location switch ships when Phase 5 does.
 
 ## Phase 0 audit findings — plan deviations (2026-06-02)
 

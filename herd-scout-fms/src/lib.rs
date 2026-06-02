@@ -52,6 +52,8 @@
 pub mod hlc;
 pub mod key;
 pub mod model;
+#[cfg(feature = "projection")]
+pub mod projection;
 pub mod store;
 
 pub use crate::hlc::Hlc;
@@ -143,6 +145,17 @@ impl Fms {
     #[doc(hidden)]
     pub async fn debug_advance_hlc(&self) -> Hlc {
         self.inner.store.advance_hlc().await
+    }
+
+    /// Diagnostic accessor: returns every record under the `log/`
+    /// prefix as `(scope, key, hlc, value)`. Used by the SQLite
+    /// projector's cold-rebuild path to enumerate every log id.
+    /// Not part of the stable public API.
+    #[doc(hidden)]
+    pub async fn debug_scan_log_records(
+        &self,
+    ) -> Result<Vec<(String, Vec<u8>, Hlc, Vec<u8>)>> {
+        self.inner.store.scan_prefix(b"log/").await
     }
 
     // -----------------------------------------------------------------

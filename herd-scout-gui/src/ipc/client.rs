@@ -275,10 +275,19 @@ fn apply_msg(state: &SharedClientState, msg: ServerMsg) {
         ServerMsg::FmsAssetList { request_id: _, kind, assets } => {
             state.records.apply_list(kind, assets);
         }
-        ServerMsg::FmsLog { .. } | ServerMsg::FmsLogList { .. } => {
-            // Phase 4 ships asset CRUD only; log-list UI lands in a
-            // follow-up. The daemon already emits these so the
-            // surface is exercised end-to-end.
+        ServerMsg::FmsLog { .. } => {
+            // Per-log details land in a follow-up; the daemon
+            // already emits these so the surface is exercised
+            // end-to-end.
+        }
+        ServerMsg::FmsLogList { request_id: _, asset_id, logs } => {
+            // Phase 3c: an empty `asset_id` flags a search reply
+            // (`FmsSearchLogs` → `handle_search_logs` reuses
+            // FmsLogList for the wire). Anything else is an
+            // asset-scoped list which we don't render yet.
+            if asset_id.is_empty() {
+                state.records.apply_search_results(logs);
+            }
         }
         ServerMsg::FmsChange { event } => {
             // The IPC reader task can't borrow an `IpcClientHandle`

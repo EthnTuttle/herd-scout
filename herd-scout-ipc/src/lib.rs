@@ -644,6 +644,20 @@ pub enum ClientMsg {
         term_id: String,
         present: bool,
     },
+    /// Plan-FMS Phase 3b: full-text search across log notes.
+    /// Returns up to `limit` matching logs as `ServerMsg::FmsLogList`
+    /// with `asset_id` set to an empty string (the search isn't
+    /// scoped to a single asset). The daemon's projection answers
+    /// the query; if the projection is unavailable the daemon
+    /// replies with `FmsError`.
+    FmsSearchLogs {
+        request_id: u64,
+        /// FTS5 MATCH expression. Leading/trailing whitespace
+        /// trimmed by the daemon; empty queries return zero hits.
+        query: String,
+        /// Max results. Daemon may cap further internally.
+        limit: u32,
+    },
 }
 
 mod base64_bytes {

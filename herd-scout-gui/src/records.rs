@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use eframe::egui;
-use herd_scout_ipc::{AssetKindWire, AssetWire, ClientMsg};
+use herd_scout_ipc::{AssetKindWire, AssetWire, ClientMsg, LogWire};
 use parking_lot::RwLock;
 
 use crate::ipc::client::IpcClientHandle;
@@ -42,6 +42,9 @@ pub struct RecordsState {
     /// Most recent FmsError that targeted a Records-tab request, for
     /// inline error display. Cleared on success.
     pub last_error: RwLock<Option<String>>,
+    /// Phase 3c: most recent log-search reply. `None` = never run a
+    /// search this session. Empty `Vec` = ran but no hits.
+    pub search_results: RwLock<Option<Vec<LogWire>>>,
     /// Set by the IPC reader on every `FmsChange`; the egui paint loop
     /// observes it on the next frame, issues a `refresh_all`, and
     /// clears it. Decouples the reader (no `IpcClientHandle`) from
@@ -103,6 +106,12 @@ impl RecordsState {
     pub fn set_error(&self, message: String) {
         *self.last_error.write() = Some(message);
     }
+
+    /// Phase 3c: stash a log-search reply. The IPC dispatcher routes
+    /// `ServerMsg::FmsLogList { asset_id: "", logs }` here.
+    pub fn apply_search_results(&self, logs: Vec<LogWire>) {
+        *self.search_results.write() = Some(logs);
+    }
 }
 
 /// Per-frame UI state for the Records tab. Held inside `App` and
@@ -119,6 +128,8 @@ pub struct RecordsUi {
     /// True when the user has activated the tab at least once. Used
     /// to drive the initial list-refresh.
     pub primed: bool,
+    /// Phase 3c: full-text search box buffer.
+    pub search_query: String,
 }
 
 impl Default for RecordsUi {
@@ -129,6 +140,7 @@ impl Default for RecordsUi {
             create_kind: AssetKindWire::Animal,
             create_name: String::new(),
             primed: false,
+            search_query: String::new(),
         }
     }
 }
@@ -172,6 +184,59 @@ pub fn render(
 
     if let Some(err) = state.last_error.read().clone() {
         ui.colored_label(egui::Color32::LIGHT_RED, format!("Error: {err}"));
+    }
+
+    // Phase 3c: full-text search across log notes.
+    ui.horizontal(|ui| {
+        ui.label("Search logs:");
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut ui_state.search_query)
+                .hint_text("e.g. thorn OR limping")
+                .desired_width(280.0),
+        );
+        let do_search = (edit.lost_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            || ui.button("Search").clicked();
+        if do_search && !ui_state.search_query.trim().is_empty() {
+            handle.try_send(ClientMsg::FmsSearchLogs {
+                request_id: state.next_id(),
+                query: ui_state.search_query.trim().to_string(),
+                limit: 50,
+            });
+        }
+        if ui.button("Clear").clicked() {
+            ui_state.search_query.clear();
+            *state.search_results.write() = None;
+        }
+    });
+
+    if let Some(results) = state.search_results.read().clone() {
+        ui.label(format!("{} hit(s)", results.len()));
+        egui::ScrollArea::vertical()
+            .id_salt("search_results_scroll")
+            .max_height(160.0)
+            .show(ui, |ui| {
+                if results.is_empty() {
+                    ui.label("(no matching logs)");
+                } else {
+                    egui::Grid::new("search_results_grid")
+                        .num_columns(3)
+                        .spacing([16.0, 4.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("Kind");
+                            ui.strong("Notes");
+                            ui.strong("Refs");
+                            ui.end_row();
+                            for log in &results {
+                                ui.label(log_kind_label(&log.kind));
+                                ui.label(truncate(&log.notes, 80));
+                                ui.label(format!("{}", log.asset_refs.len()));
+                                ui.end_row();
+                            }
+                        });
+                }
+            });
     }
 
     ui.separator();
@@ -282,4 +347,24 @@ fn short_id(id: &str) -> String {
     } else {
         id.to_string()
     }
+}
+
+fn log_kind_label(k: &herd_scout_ipc::LogKindWire) -> &'static str {
+    use herd_scout_ipc::LogKindWire as L;
+    match k {
+        L::Observation => "Observation",
+        L::Medical => "Medical",
+        L::Movement => "Movement",
+        L::Weight => "Weight",
+        L::Birth => "Birth",
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }

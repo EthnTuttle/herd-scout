@@ -18,6 +18,20 @@ blake3 = "1"
 hex = "0.4"
 iroh = { workspace = true }
 
+# Plan-FMS Phase 3: SQLite read-projection. Feature-gated so the
+# crate stays light when the projection isn't compiled in.
+# `bundled` builds against the in-tree SQLite amalgamation so we don't
+# depend on system libsqlite3 (matters for the CI/Linux daemon
+# images). `fts5` enables the virtual-table extension we use for
+# full-text search across log notes per
+# .wiki/wiki/concepts/iroh-docs-fms-schema.md §"Indexing — SQLite
+# projection".
+rusqlite = { version = "0.32", features = ["bundled", "blob"], optional = true }
+
+[features]
+default = ["projection"]
+projection = ["dep:rusqlite"]
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }

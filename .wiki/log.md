@@ -141,3 +141,22 @@ Phases: Phase 0 iroh-smol-kv API audit (1w) → Phase 1 `herd-scout-fms` crate (
 
 Open questions surfaced: iroh-smol-kv crate publication state, Medical-withdrawal units (suggest `i32 days`), Term-taxonomy bootstrap (suggest tiny default set), Group-membership model (locked: `asset/<animal-id>/parent → <group-id>`, derive Group members), iroh 1.0 GA migration as separate wave, EID-to-FMS hand-off via IPC `CreateAsset` (no in-plan wiring), multi-farm out of scope (one namespace per daemon for v1).
 
+
+## [2026-06-02] phase 3 shipped | Plan-FMS Phase 3 — daemon SQLite projection + FTS5 search
+
+Lands the daemon-side half of the originally-scoped Phase 3.
+`herd-scout-fms` gained a `projection` feature (default-on) wrapping
+rusqlite 0.32 (bundled SQLite + FTS5). Daemon opens the projection
+next to `<data_dir>/fms/`, wipes-and-rebuilds on every boot, and
+spawns a tokio subscriber that applies every `ChangeEvent` as an
+upsert. New `ClientMsg::FmsSearchLogs` RPC + daemon handler
+(`fms_rpc::handle_search_logs`) run FTS5 BM25-ranked queries through
+the projection and reply via the existing `FmsLogList` variant.
+egui Records tab gained a search box wired to the same RPC. The
+"remote-mode GUI runs its own iroh peer" surface
+(`HERD_SCOUT_GUI_MODE`) stays deferred under Phase 5 — no
+cross-device records to mirror until durable smol-kv lands or the
+daemon owns records-exchange.
+
+Workspace test count: 158 (3 new projection tests). See plan §"Phase
+3 shipped" for the full deviation note.
