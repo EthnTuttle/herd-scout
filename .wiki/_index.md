@@ -2,7 +2,7 @@
 
 - topic: herd-scout
 - created: 2026-05-19
-- updated: 2026-06-01
+- updated: 2026-06-02
 - status: active
 - type: local
 - summary: Open source livestock-focused farm management — Rust + iroh P2P + drone vision + native mobile
@@ -78,3 +78,5 @@
 - [[output/playbook-accurate-herd-counting-2026-05-27]] — playbook for accurate herd counting from CV detections (5-layer pipeline: detection → tracking → counting → aggregation → validation; EID reconciliation as the differentiator)
 - [[output/plan-desktop-video-upload-2026-05-28]] — roadmap for desktop video upload to daemon (fifth ALPN `herd-scout/upload/1` over iroh-blobs, sidecar file-decode mode, single-clip queue behind live phone, per-clip JSON report applying the accurate-counting playbook, GUI drag-drop + `herdctl push`)
 - [[output/playbook-mot-airframe-2026-06-01]] — Round-4 playbook: P0/P1/P2 counting upgrades (YOLO26 retrain, block-bootstrap+BCa+J+aB, OC-SORT A/B, HIT post-hoc, self-supervised cattle re-ID) + buildable phone-on-drone airframe spec (95A TPU + 50A grommets + suspended topology, USB-PD power, thermal listener ladder, `camera|connectedDevice` FGS manifest)
+- [[output/assess-herd-scout-2026-06-02]] — Repo vs wiki vs market gap analysis (--retardmax): 14 alignments, 10 research gaps, 19 build opportunities, 17 market gaps; immediate `/wiki:research` queue, P0/P1/P2 build queue, competitive landscape, emerging trends, anti-patterns from the OSS livestock graveyard, confidence notes
+- [[output/plan-fms-schema-and-records-2026-06-02]] — Roadmap for the assess P0: iroh-smol-kv FMS schema + Animal/Group/Land/Equipment + 5-log CRUD; 7 architecture decisions, 7 phases, egui frontend (Tauri 2 deferred), co-location-aware SQLite projection, QR farm-namespace onboarding, iroh 0.98.0 pin (defers EID crate + JSON:API to separate plans)

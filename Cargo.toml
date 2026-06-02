@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "herd-scout-daemon",
+    "herd-scout-fms",
     "herd-scout-gui",
     "herd-scout-identity",
     "herd-scout-ipc",

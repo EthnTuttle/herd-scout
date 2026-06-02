@@ -103,3 +103,41 @@ B. Phone-on-drone airframe:
 Output: [[output/playbook-mot-airframe-2026-06-01]] — P0/P1/P2 counting upgrades + buildable phone-on-drone airframe spec, with 3 suggested theses for future `/wiki:research --mode thesis`.
 
 Open gaps surfaced (durable follow-ups): (1) no academic UAV paper on smartphone payload mounting (publishable opportunity), (2) compute fit of BUSCA on Pascal needs benchmarking, (3) MultiCamCows2024 license (CC BY-NC-SA 4.0) is non-commercial — site-specific self-supervised training is the canonical path, (4) mobile encode H.264 vs HEVC vs AV1 thermal benchmarks gated behind paywalls.
+
+## [2026-06-02] assess --retardmax | herd-scout repo (`/Users/garykrause/repos/herd-scout`) → 14 alignments, 10 research gaps, 19 build opportunities, 17 market gaps
+
+Compared the local repo against the local `.wiki/` (25 concept articles + 1 reference + 9 outputs across 48 sources) and the broader market via 5 parallel web-research agents (competitors, best practices, emerging trends, adjacent fields, failures).
+
+Headline findings:
+
+- **The repo has built the harder half first.** 5 iroh ALPNs (MoQ, gossip, SSH bridge, admin RPC, blob upload), versioned identity envelope, append-only audit log + Sigstore Rekor mirror, Wave-14 AccessLimit predicate gate, Android phone publisher (CameraX + MediaCodec + Wave-14 FGS manifest), egui desktop, herdctl iroh-bound CLI, Python YOLO sidecar over UDS — Waves 1–14 all shipped.
+- **The FMS half — the actual differentiator per the wiki — is not yet in code.** No Animal/Group/Land/Log records, no iroh-smol-kv KV CRDT wired (despite being the declared data plane), no EID reader bridge, no paddock map, no farmOS-compat JSON:API, no compliance reporting. Desktop is egui, not Tauri 2 (wiki/repo mismatch).
+- **CV pipeline implements layers 1–2 of the wiki's 5-layer counting stack;** layers 3 (deployment-aware policy), 4 (Lincoln-Petersen / N-mixture), 5 (conformal + EID reconciliation) are designs only.
+- **Drone integration is research-only** — buildable BOM and post-hoc playbooks live in `output/`, but no MAVLink or ODM ingest exists in `src/`.
+- **Market gap is real and getting more crowded.** Closed incumbents (AgriWebb 17k producers, Halter satellite SKU 2026, Vence, 701x, Datamars, Allflex SenseHub, CattleEye, Optifarm) own ranch UX with monthly subscriptions; OSS competitors (farmOS, LiteFarm, Ekylibre [SaaS sunsetting 2026]) are stable but web-PWA-first with no livestock CV. Nobody — open or closed — currently ships `(Rust + P2P + drone-CV + EID-reconciliation + native-mobile)`.
+
+Recommendations cluster as:
+- **P0**: iroh-smol-kv FMS schema crate; Animal/Group/Land/Equipment record types + minimal CRUD; `herd-scout-eid` Bluetooth-reader Rust crate (weekend MVP per [[concepts/livestock-eid-rfid]]).
+- **P1**: Counting layers 3+5 (deployment-policy + conformal + 🟢/🟡/🔴 chip); farmOS JSON:API consumer/producer; treatment log + withdrawal flag; documented accuracy commitments; paddock polygons + animal-last-seen pin.
+- **P2**: YOLO26 + OccluBoost / RF-DETR-M; DINOv3 + WildFusion ReID; Lincoln-Petersen / N-mixture; WebODM/DroneDB ingest (L5); `mavlink` crate + 4G bridge; Tauri 2 frontend (iOS); compliance exports (USDA 840, NLIS, CCIA, EU passport); ICAR ADE / OADA `formats` / AgGateway TraceabilityAPI adapters; on-device LLM ("ask the herd").
+
+Anti-patterns from the OSS livestock graveyard (OpenFarm, Tania, DroneKit-Android, BeefChain, Cainthus → Ever.Ag, PastureMap, Vence → Merck, HerdNet weights CC-BY-NC-SA poison pill, Tauri 2 mobile churn) captured as a section in the report.
+
+Output: [[output/assess-herd-scout-2026-06-02]] — full gap analysis with research commands, build queue, competitive landscape, emerging trends, anti-patterns, confidence notes.
+
+
+## [2026-06-02] plan | "FMS schema and other P0" → output/plan-fms-schema-and-records-2026-06-02.md (9 wiki articles + 2 inventory items + 1 assess output consulted, 7 architecture decisions, 7 phases)
+
+Roadmap for the assess P0 record-layer work. User-locked scope: iroh-smol-kv schema + Animal/Group/Land/Equipment records + Observation/Medical/Movement/Weight/Birth log CRUD only — defers `herd-scout-eid` Bluetooth crate and farmOS JSON:API consumer/producer to separate plans. Frontend extends existing egui (no Tauri 2 pivot — wiki-flagged churn risk). iroh stays pinned at 0.98.0 / iroh-blobs 0.102.0 (blocked on watch [[inventory/watch/iroh-blobs-233-poisoned-store]]).
+
+Key architecture decisions:
+- Entity-attribute key layout, one scalar per key (per [[wiki/concepts/iroh-docs-fms-schema]])
+- ULID + HLC mandatory; never wallclock LWW
+- Per-field conflict strategy: LWW (name/notes), add-wins-set (tags, asset_refs), append-only (logs, quantities)
+- Co-location-aware SQLite projection — GUI probes IPC socket at startup; reachable → IPC reader, no local SQLite; unreachable → own iroh peer + own SQLite. Configurable override via `HERD_SCOUT_GUI_MODE`.
+- LiveTicket-style farm-namespace QR invites — reuses Wave-2 ML Kit scanner + daemon ticket-mint pipeline.
+
+Phases: Phase 0 iroh-smol-kv API audit (1w) → Phase 1 `herd-scout-fms` crate (2w) → Phase 2 daemon integration + IPC RPCs (1w) → Phase 3 SQLite projection + GUI co-location (1w) → Phase 4 egui Records + Logs UX (2-3w) → Phase 5 QR farm-namespace onboarding (1w) → Phase 6 validation + README + audit-log integration (1w). ~9-11 weeks total.
+
+Open questions surfaced: iroh-smol-kv crate publication state, Medical-withdrawal units (suggest `i32 days`), Term-taxonomy bootstrap (suggest tiny default set), Group-membership model (locked: `asset/<animal-id>/parent → <group-id>`, derive Group members), iroh 1.0 GA migration as separate wave, EID-to-FMS hand-off via IPC `CreateAsset` (no in-plan wiring), multi-farm out of scope (one namespace per daemon for v1).
+

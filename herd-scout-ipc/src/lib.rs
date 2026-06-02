@@ -107,6 +107,111 @@ pub struct AuditRecord {
     pub details: serde_json::Value,
 }
 
+// =====================================================================
+// FMS records (Phase 2 of plan-fms-schema-and-records-2026-06-02)
+// =====================================================================
+
+/// Asset kinds the FMS records layer tracks. Mirrors
+/// `herd_scout_fms::AssetKind` but kept as a plain enum here so the
+/// IPC crate doesn't depend on `herd-scout-fms` (one-way dependency:
+/// daemon → fms, ipc independent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetKindWire {
+    Animal,
+    Group,
+    Land,
+    Equipment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogKindWire {
+    Observation,
+    Medical,
+    Movement,
+    Weight,
+    Birth,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuantityWire {
+    pub measure: String,
+    pub value: f64,
+    pub unit: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Mutable scalar fields on an asset. Used by
+/// [`ClientMsg::FmsUpdateAssetField`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetFieldWire {
+    Name,
+    Notes,
+    Geom,
+    Parent,
+}
+
+/// Asset payload returned to the GUI in [`ServerMsg::FmsAsset`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetWire {
+    /// ULID, base32 (the standard 26-char form).
+    pub id: String,
+    pub kind: AssetKindWire,
+    pub name: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub archived: bool,
+    /// Term ULIDs.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Log payload returned to the GUI in [`ServerMsg::FmsLog`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogWire {
+    pub id: String,
+    pub kind: LogKindWire,
+    /// Wallclock-ish nanos (HLC `ts_ns` half). Cosmetic — the daemon's
+    /// HLC drives ordering; the GUI shows this for human display.
+    pub ts_ns: u64,
+    #[serde(default)]
+    pub asset_refs: Vec<String>,
+    #[serde(default)]
+    pub quantities: Vec<QuantityWire>,
+    #[serde(default)]
+    pub notes: String,
+}
+
+/// Per-write change notification pushed to every connected GUI on a
+/// successful FMS commit. The IPC server fans these out to all
+/// connected GUIs from a broadcast channel; per-GUI projections refresh
+/// the affected list views.
+///
+/// `kind_hint` is `Some(asset_kind)` when the changed key belongs to
+/// an asset entity; the GUI uses it to skip refreshes for unrelated
+/// kinds without parsing the key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FmsChangeWire {
+    pub scope: String,
+    /// UTF-8 key (smol-kv-shaped), e.g. `asset/<ULID>/name`.
+    pub key: String,
+    /// Wallclock-ish nanos at write time.
+    pub ts_ns: u64,
+    /// `lww` / `add_wins_set` / `append_only`.
+    pub strategy: String,
+    /// Cheap dispatch hint — `Some("animal" | "group" | "land" |
+    /// "equipment")` when key targets an asset; `Some("log")` when key
+    /// targets a log; `None` otherwise.
+    #[serde(default)]
+    pub entity_hint: Option<String>,
+}
+
 /// Lifecycle of a queued upload. Surfaced to the GUI via
 /// [`ServerMsg::UploadStatus`] and to admin clients via
 /// [`UploadServerMsg::QueueSnapshot`].
@@ -388,6 +493,44 @@ pub enum ServerMsg {
         text: Option<String>,
         disabled: bool,
     },
+
+    // === FMS RPC replies (Phase 2) ===
+    /// Reply to [`ClientMsg::FmsCreateAsset`] / `FmsReadAsset` /
+    /// `FmsUpdateAssetField` / `FmsArchiveAsset`. `request_id` echoes
+    /// the client's request id so out-of-order responses correlate.
+    FmsAsset {
+        request_id: u64,
+        /// `Some` when the request resolved to a real asset (read /
+        /// create / update); `None` when the asset was not found.
+        asset: Option<AssetWire>,
+    },
+    /// Reply to [`ClientMsg::FmsListAssets`].
+    FmsAssetList {
+        request_id: u64,
+        kind: AssetKindWire,
+        assets: Vec<AssetWire>,
+    },
+    /// Reply to [`ClientMsg::FmsAppendLog`] / `FmsReadLog`.
+    FmsLog {
+        request_id: u64,
+        log: Option<LogWire>,
+    },
+    /// Reply to [`ClientMsg::FmsListLogsForAsset`].
+    FmsLogList {
+        request_id: u64,
+        asset_id: String,
+        logs: Vec<LogWire>,
+    },
+    /// Live change notification. Pushed to every connected GUI on
+    /// every FMS commit. Not request-correlated.
+    FmsChange { event: FmsChangeWire },
+    /// Generic FMS error reply. `request_id` echoes the failing
+    /// request; `message` is human-readable.
+    FmsError {
+        request_id: u64,
+        code: String,
+        message: String,
+    },
 }
 
 /// Messages sent GUI → daemon.
@@ -430,6 +573,77 @@ pub enum ClientMsg {
     /// GUI → daemon: cancel a queued upload by BLAKE3 hex prefix
     /// (full hash; truncation is a GUI-side affordance).
     UploadCancel { blake3_hex: String },
+
+    // === FMS record CRUD (Phase 2) ===
+    /// Create a new asset.
+    FmsCreateAsset {
+        request_id: u64,
+        kind: AssetKindWire,
+        name: String,
+    },
+    /// Read an asset by id.
+    FmsReadAsset {
+        request_id: u64,
+        id: String,
+    },
+    /// Update a single mutable scalar field on an asset.
+    FmsUpdateAssetField {
+        request_id: u64,
+        id: String,
+        field: AssetFieldWire,
+        /// Bytes go on the wire base64-url-no-pad encoded so JSON
+        /// stays printable.
+        #[serde(with = "base64_bytes")]
+        value: Vec<u8>,
+    },
+    /// Soft-archive an asset.
+    FmsArchiveAsset {
+        request_id: u64,
+        id: String,
+    },
+    /// List assets by kind (optionally including archived).
+    FmsListAssets {
+        request_id: u64,
+        kind: AssetKindWire,
+        #[serde(default)]
+        include_archived: bool,
+    },
+    /// Append a log entry. `id` is a fresh ULID picked by the GUI
+    /// (so the GUI can render the log immediately and reconcile on
+    /// the FmsLog reply).
+    FmsAppendLog {
+        request_id: u64,
+        id: String,
+        kind: LogKindWire,
+        /// Cosmetic display-time wallclock nanos. The daemon stamps
+        /// the authoritative HLC.
+        ts_ns: u64,
+        #[serde(default)]
+        asset_refs: Vec<String>,
+        #[serde(default)]
+        quantities: Vec<QuantityWire>,
+        #[serde(default)]
+        notes: String,
+    },
+    /// Read a log by id.
+    FmsReadLog {
+        request_id: u64,
+        id: String,
+    },
+    /// List logs that reference the given asset.
+    FmsListLogsForAsset {
+        request_id: u64,
+        asset_id: String,
+    },
+    /// Add or remove a tag (term reference) on an asset. `present` =
+    /// true writes the add-wins-set entry; `false` writes the
+    /// tombstone.
+    FmsTagAsset {
+        request_id: u64,
+        asset_id: String,
+        term_id: String,
+        present: bool,
+    },
 }
 
 mod base64_bytes {

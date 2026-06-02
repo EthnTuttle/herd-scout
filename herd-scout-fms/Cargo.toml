@@ -1,0 +1,26 @@
+[package]
+name = "herd-scout-fms"
+version = "0.1.0"
+edition = "2021"
+description = "Asset / Log / Quantity / Term FMS records on a smol-kv-shaped on-disk store"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "sync", "macros", "rt"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+ulid = { version = "1", features = ["serde"] }
+blake3 = "1"
+hex = "0.4"
+iroh = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

@@ -16,6 +16,7 @@ mod frame_view;
 mod ipc;
 mod overlay;
 mod pairing;
+mod records;
 mod ui;
 mod uploads;
 

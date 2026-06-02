@@ -22,6 +22,7 @@ use crate::frame_view::FrameView;
 use crate::ipc::client::{IpcClientHandle, SharedClientState};
 use crate::overlay;
 use crate::pairing;
+use crate::records::{self, RecordsUi};
 use crate::uploads::{self, UploadRow};
 
 const RECONNECT_STALE_AFTER: Duration = Duration::from_secs(2);
@@ -77,6 +78,17 @@ pub struct App {
     /// `None` clears it; populated rows fade out after
     /// [`UPLOAD_BANNER_TTL`].
     upload_banner: Option<(String, Instant)>,
+    /// Plan-FMS Phase 4: which top-level tab is active.
+    active_tab: Tab,
+    /// Plan-FMS Phase 4: per-frame state for the Records tab.
+    records_ui: RecordsUi,
+}
+
+/// Top-level GUI tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Live,
+    Records,
 }
 
 impl App {
@@ -97,6 +109,8 @@ impl App {
             last_counted_pts_ms: None,
             start_instant: Instant::now(),
             upload_banner: None,
+            active_tab: Tab::Live,
+            records_ui: RecordsUi::default(),
         }
     }
 
@@ -704,6 +718,11 @@ impl eframe::App for App {
 
         egui::TopBottomPanel::top("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // Plan-FMS Phase 4: top-level tab switcher.
+                ui.selectable_value(&mut self.active_tab, Tab::Live, "Live");
+                ui.selectable_value(&mut self.active_tab, Tab::Records, "Records");
+                ui.separator();
+
                 let (color, label) = status_chip(&status);
                 ui.colored_label(color, format!("● {label}"));
                 if let ConnectionStatus::Reconnecting { reason } = &status {
@@ -736,6 +755,28 @@ impl eframe::App for App {
         // Phase 5: uploads side panel. Drawn before the central panel
         // so the central panel's `available_size()` accounts for it.
         self.draw_uploads_panel(ctx);
+
+        // Plan-FMS Phase 4: drain the IPC reader's "refresh records"
+        // flag and issue the queries on its behalf. Done once per
+        // frame regardless of which tab is active so the cache stays
+        // warm if the user switches tabs.
+        if self.state.records.drain_refresh() {
+            self.state.records.refresh_all(&self.handle);
+        }
+
+        if self.active_tab == Tab::Records {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().inner_margin(12.0))
+                .show(ctx, |ui| {
+                    records::render(
+                        ui,
+                        &self.state.records,
+                        &mut self.records_ui,
+                        &self.handle,
+                    );
+                });
+            return;
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(0.0))

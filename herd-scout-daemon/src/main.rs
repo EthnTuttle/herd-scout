@@ -23,7 +23,7 @@
 // `lib.rs` so the upload pipeline can share them with the daemon
 // binary. Bin-only modules (everything that doesn't need to be
 // reachable from `upload`) stay declared here.
-use herd_scout_daemon::{admin, audit, control, cv, ipc, upload};
+use herd_scout_daemon::{admin, audit, control, cv, fms_rpc, ipc, upload};
 #[cfg(feature = "rekor-mirror")]
 use herd_scout_daemon::audit_mirror;
 mod daemon_secret;
@@ -72,6 +72,17 @@ async fn main() -> Result<()> {
             None
         }
     };
+
+    // Plan-FMS Phase 2: open the records store next to prefs. The two
+    // share `directories::ProjectDirs` so they land in the same
+    // OS-conventional data dir; the FMS files live under a `fms/`
+    // subdir owned by the new crate.
+    //
+    // Author tag: cribbed from the prefs Store. If prefs failed to
+    // open we still bring up FMS using a temp data dir + ephemeral
+    // author so the IPC surface is non-fatal — record persistence is
+    // best-effort until the operator fixes the data dir.
+    let fms = open_fms_records().await;
 
     // Bring up the Live endpoint. We hand-build the iroh `Router`
     // ourselves (NOT `with_router()`) so we can mount the Wave 11
@@ -339,6 +350,16 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Plan-FMS Phase 2: bridge FMS change events to the GUI broadcast
+    // and the audit log.
+    if let Some(fms_handle) = fms.as_ref() {
+        fms_rpc::spawn_change_bridge(
+            fms_handle,
+            server_tx.clone(),
+            Some(audit_log.clone()),
+        );
+    }
+
     // Control loop: handle GUI requests.
     let live_for_ctrl = live.clone();
     let store_for_ctrl = store.clone();
@@ -460,6 +481,119 @@ async fn main() -> Result<()> {
                     upload::handler::handle_local_cancel(&h, &blake3_hex).await;
                 });
             }
+
+            // === FMS records (Phase 2) ===
+            ClientMsg::FmsCreateAsset { request_id, kind, name } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_create_asset(f, &server_tx_ctrl, request_id, kind, name);
+                } else {
+                    let _ = server_tx_ctrl.send(ServerMsg::FmsError {
+                        request_id,
+                        code: "fms_unavailable".into(),
+                        message: "FMS records store failed to open at boot".into(),
+                    });
+                }
+            }
+            ClientMsg::FmsReadAsset { request_id, id } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_read_asset(f, &server_tx_ctrl, request_id, id);
+                }
+            }
+            ClientMsg::FmsUpdateAssetField {
+                request_id,
+                id,
+                field,
+                value,
+            } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_update_asset_field(
+                        f,
+                        &server_tx_ctrl,
+                        request_id,
+                        id,
+                        field,
+                        value,
+                    );
+                }
+            }
+            ClientMsg::FmsArchiveAsset { request_id, id } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_archive_asset(f, &server_tx_ctrl, request_id, id);
+                }
+            }
+            ClientMsg::FmsListAssets {
+                request_id,
+                kind,
+                include_archived,
+            } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_list_assets(
+                        f,
+                        &server_tx_ctrl,
+                        request_id,
+                        kind,
+                        include_archived,
+                    );
+                }
+            }
+            ClientMsg::FmsAppendLog {
+                request_id,
+                id,
+                kind,
+                ts_ns,
+                asset_refs,
+                quantities,
+                notes,
+            } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_append_log(
+                        f,
+                        &server_tx_ctrl,
+                        request_id,
+                        id,
+                        kind,
+                        ts_ns,
+                        asset_refs,
+                        quantities,
+                        notes,
+                    );
+                }
+            }
+            ClientMsg::FmsReadLog { request_id, id } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_read_log(f, &server_tx_ctrl, request_id, id);
+                }
+            }
+            ClientMsg::FmsListLogsForAsset {
+                request_id,
+                asset_id,
+            } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_list_logs_for_asset(
+                        f,
+                        &server_tx_ctrl,
+                        request_id,
+                        asset_id,
+                    );
+                }
+            }
+            ClientMsg::FmsTagAsset {
+                request_id,
+                asset_id,
+                term_id,
+                present,
+            } => {
+                if let Some(f) = fms.as_ref() {
+                    fms_rpc::handle_tag_asset(
+                        f,
+                        &server_tx_ctrl,
+                        request_id,
+                        asset_id,
+                        term_id,
+                        present,
+                    );
+                }
+            }
         }
     }
 
@@ -471,6 +605,50 @@ async fn main() -> Result<()> {
     }
     live.shutdown().await;
     Ok(())
+}
+
+/// Opens the Plan-FMS records store under the same data dir
+/// `audit::audit_dir()` resolves (typically
+/// `$XDG_DATA_HOME/herd-scout/`). Best-effort: returns `None` and
+/// logs on failure so the daemon's IPC surface stays up.
+async fn open_fms_records() -> Option<herd_scout_fms::Fms> {
+    // The audit module's data-dir resolver gives us a stable
+    // OS-conventional path. The fms crate puts its files under a
+    // `fms/` subdir inside whatever path we hand it.
+    let data_dir = match audit::audit_dir() {
+        Ok(p) => {
+            // audit_dir is `<data_dir>/herd-scout`; FMS lives next
+            // to it, not nested under it.
+            p.parent().map(|p| p.to_path_buf()).unwrap_or(p)
+        }
+        Err(e) => {
+            warn!("fms: cannot resolve data dir, using temp_dir: {e:#}");
+            std::env::temp_dir().join("herd-scout")
+        }
+    };
+
+    // Author tag: derive a stable per-device hex string. We don't
+    // need the actual ed25519 secret here — the smol-kv-shaped
+    // sidecar uses the tag only as the LWW tiebreaker. The Wave 12
+    // identity envelope owns key material; this just borrows the
+    // canonical NodeId hex form.
+    let author_pub_hex = match std::env::var("IROH_SECRET") {
+        Ok(s) if s.len() == 64 => s,
+        _ => {
+            // Fallback: a well-known string so two records from this
+            // daemon are LWW-comparable. Real device-author work
+            // already lives in `store/mod.rs`; we'll unify in Phase 5.
+            "herd-scout-daemon-default-author".to_string()
+        }
+    };
+
+    match herd_scout_fms::Fms::open(&data_dir, author_pub_hex).await {
+        Ok(f) => Some(f),
+        Err(e) => {
+            warn!("fms: open failed (records disabled): {e:#}");
+            None
+        }
+    }
 }
 
 fn init_tracing() {

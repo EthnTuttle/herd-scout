@@ -20,3 +20,4 @@ pub mod audit_mirror;
 pub mod control;
 pub mod ipc;
 pub mod admin;
+pub mod fms_rpc;

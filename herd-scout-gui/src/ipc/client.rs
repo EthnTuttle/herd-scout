@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::frame::{read_frame, write_frame};
+use crate::records::RecordsState;
 use crate::uploads::UploadsState;
 
 /// Snapshot of the latest preview frame the daemon emitted.
@@ -66,12 +67,18 @@ pub struct SharedClientState {
     /// to share — internally `Arc<RwLock<…>>` — and read by the egui
     /// paint loop on every repaint.
     pub uploads: UploadsState,
+    /// Plan-FMS Phase 4: cached asset lists keyed by kind, plus a
+    /// per-tab error slot. `Arc` because the IPC dispatcher and the
+    /// egui paint loop both read it; the `RwLock`s inside live behind
+    /// the `Arc`.
+    pub records: Arc<RecordsState>,
 }
 
 impl SharedClientState {
     pub fn arc() -> Arc<Self> {
         Arc::new(Self {
             status: RwLock::new(ConnectionStatus::Idle),
+            records: RecordsState::arc(),
             ..Default::default()
         })
     }
@@ -257,6 +264,34 @@ fn apply_msg(state: &SharedClientState, msg: ServerMsg) {
                 eta_ms,
                 summary,
             );
+        }
+        ServerMsg::FmsAsset { request_id: _, asset: _ } => {
+            // The change-bridge already pushed a FmsChange that will
+            // trigger a list refresh; per-asset replies are
+            // request-correlated for future per-row UX. Today the
+            // Records tab refreshes everything on change, so we
+            // intentionally drop this message.
+        }
+        ServerMsg::FmsAssetList { request_id: _, kind, assets } => {
+            state.records.apply_list(kind, assets);
+        }
+        ServerMsg::FmsLog { .. } | ServerMsg::FmsLogList { .. } => {
+            // Phase 4 ships asset CRUD only; log-list UI lands in a
+            // follow-up. The daemon already emits these so the
+            // surface is exercised end-to-end.
+        }
+        ServerMsg::FmsChange { event } => {
+            // The IPC reader task can't borrow an `IpcClientHandle`
+            // here (we're inside `apply_msg`, which only sees
+            // `state`). Instead we set a flag and let the egui paint
+            // loop notice it on the next frame and issue the
+            // refresh. This keeps the reader free of UI plumbing.
+            if event.entity_hint.is_none() || event.entity_hint.as_deref() == Some("asset") {
+                *state.records.refresh_pending.write() = true;
+            }
+        }
+        ServerMsg::FmsError { request_id: _, code, message } => {
+            state.records.set_error(format!("{code}: {message}"));
         }
     }
 }
