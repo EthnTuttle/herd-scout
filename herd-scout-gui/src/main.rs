@@ -22,6 +22,7 @@ mod uploads;
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -31,6 +32,9 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 const TICKET_ENV: &str = "HERD_SCOUT_TICKET";
+/// Plan: remote-IPC bridge — env var that selects a remote daemon
+/// instead of the local UDS. CLI `--daemon <NodeId>` takes precedence.
+const DAEMON_NODE_ENV: &str = "HERD_SCOUT_DAEMON";
 
 fn main() -> eframe::Result<()> {
     init_tracing();
@@ -44,52 +48,69 @@ fn main() -> eframe::Result<()> {
 
     let cli_ticket_str = parse_ticket_arg();
 
-    // Resolve the socket path the daemon will (or does) bind.
-    let socket_path = match daemon_socket_path() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("could not resolve daemon socket path: {e:#}");
-            return Err(eframe::Error::AppCreation(format!("{e:#}").into()));
-        }
-    };
-    info!(path = %socket_path.display(), "GUI: daemon socket path");
+    // Plan: remote-IPC bridge — `--daemon <NodeId>` (or
+    // `HERD_SCOUT_DAEMON=…`) skips the local UDS path and dials the
+    // daemon's `herd-scout/ipc/1` ALPN over iroh.
+    let remote_node = parse_daemon_node_arg();
 
-    // Try connect; auto-spawn on failure.
     let handle = rt.block_on(async {
-        match ipc::client::connect_with_retry(&socket_path, Duration::from_millis(200)).await {
-            Ok(_stream) => {
-                // Discard the probe stream; we'll reconnect in the
-                // run_client call which sets up the reader/writer pair.
+        let state = ipc::client::SharedClientState::arc();
+        let ctx_for_repaint = std::sync::Mutex::new(None::<egui::Context>);
+        let repaint_handle: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>> =
+            std::sync::Arc::new(ctx_for_repaint);
+        let rh = repaint_handle.clone();
+        let cb = move || {
+            if let Some(ctx) = rh.lock().ok().and_then(|g| g.clone()) {
+                ctx.request_repaint();
             }
-            Err(_e) => {
+        };
+
+        let handle = if let Some(node_id) = remote_node {
+            info!(daemon = %node_id.fmt_short(), "GUI: remote mode");
+            match load_or_create_gui_identity().await {
+                Ok(secret) => {
+                    let me = secret.public();
+                    info!(
+                        gui_node = %me.fmt_short(),
+                        "GUI: local NodeId (must be in daemon's [control_plane.admins])",
+                    );
+                    ipc::client::run_remote_client(node_id, secret, state, cb).await
+                }
+                Err(e) => Err(anyhow!("identity load failed: {e:#}")),
+            }
+        } else {
+            // Local UDS path — auto-spawn daemon if the socket is
+            // unreachable.
+            let socket_path = match daemon_socket_path() {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        Err::<ipc::client::IpcClientHandle, anyhow::Error>(anyhow!(
+                            "could not resolve daemon socket path: {e:#}"
+                        )),
+                        repaint_handle,
+                    );
+                }
+            };
+            info!(path = %socket_path.display(), "GUI: local UDS mode");
+
+            if ipc::client::connect_with_retry(&socket_path, Duration::from_millis(200))
+                .await
+                .is_err()
+            {
                 info!("daemon socket missing; spawning daemon child");
                 if let Err(e) = spawn_daemon_child().await {
                     tracing::error!("could not spawn daemon: {e:#}");
                 }
-                // Wait up to 5 s for the daemon to bind.
                 if let Err(e) =
-                    ipc::client::connect_with_retry(&socket_path, Duration::from_secs(5)).await
+                    ipc::client::connect_with_retry(&socket_path, Duration::from_secs(5))
+                        .await
                 {
                     tracing::error!("daemon never came up: {e:#}");
                 }
             }
-        }
-
-        let state = ipc::client::SharedClientState::arc();
-        let ctx_for_repaint = std::sync::Mutex::new(None::<egui::Context>);
-        // Closure-bridge: the reader task wants a `Fn()` to call when
-        // a message arrives; we route that through a clonable
-        // `Arc<dyn Fn>` once egui is up.
-        let repaint_handle: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>> =
-            std::sync::Arc::new(ctx_for_repaint);
-        let rh = repaint_handle.clone();
-
-        let handle = ipc::client::run_client(&socket_path, state, move || {
-            if let Some(ctx) = rh.lock().ok().and_then(|g| g.clone()) {
-                ctx.request_repaint();
-            }
-        })
-        .await;
+            ipc::client::run_client(&socket_path, state, cb).await
+        };
 
         (handle, repaint_handle)
     });
@@ -181,6 +202,53 @@ async fn spawn_daemon_child() -> Result<()> {
         .spawn()
         .with_context(|| format!("failed to spawn {}", daemon.display()))?;
     Ok(())
+}
+
+/// Parses `--daemon <NodeId>` from argv or `$HERD_SCOUT_DAEMON`.
+/// Returns `None` for "no remote-mode flag set" — the caller falls
+/// back to the local UDS path.
+fn parse_daemon_node_arg() -> Option<iroh::EndpointId> {
+    let raw = cli_daemon().or_else(|| std::env::var(DAEMON_NODE_ENV).ok())?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match iroh::EndpointId::from_str(raw) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            warn!("--daemon NodeId parse failed: {e}; falling back to local mode");
+            None
+        }
+    }
+}
+
+fn cli_daemon() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(eq) = arg.strip_prefix("--daemon=") {
+            return Some(eq.to_string());
+        }
+        if arg == "--daemon" {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// Loads (or creates) this GUI's iroh identity envelope. Same shape
+/// as `herdctl`'s identity (`herd_scout_identity::load_or_generate`)
+/// so an operator can reuse the same NodeId across CLI and GUI.
+async fn load_or_create_gui_identity() -> Result<iroh::SecretKey> {
+    let dirs = directories::ProjectDirs::from("net", "herd-scout", "herd-scout-gui")
+        .ok_or_else(|| anyhow!("no config dir available"))?;
+    let path = dirs.config_dir().join("identity.toml");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let id = herd_scout_identity::load_or_generate(&path, "herd-scout-gui")
+        .with_context(|| format!("load or create identity at {}", path.display()))?;
+    Ok(id.secret)
 }
 
 fn parse_ticket_arg() -> Option<String> {

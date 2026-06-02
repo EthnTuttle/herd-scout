@@ -23,7 +23,7 @@
 // `lib.rs` so the upload pipeline can share them with the daemon
 // binary. Bin-only modules (everything that doesn't need to be
 // reachable from `upload`) stay declared here.
-use herd_scout_daemon::{admin, audit, control, cv, fms_rpc, ipc, upload};
+use herd_scout_daemon::{admin, audit, control, cv, fms_rpc, ipc, remote_ipc, upload};
 #[cfg(feature = "rekor-mirror")]
 use herd_scout_daemon::audit_mirror;
 mod daemon_secret;
@@ -221,11 +221,30 @@ async fn main() -> Result<()> {
     // here, ahead of the rest of the channel wiring further down.
     let (server_tx, _) = broadcast::channel::<ServerMsg>(256);
 
+    // Client mpsc must also exist this early so the remote-IPC ALPN
+    // handler can capture the sender before the router spawns. The
+    // UDS server further down clones it.
+    let (client_tx, mut client_rx) = mpsc::channel::<ClientMsg>(32);
+
     let upload_handler = upload::handler::UploadHandler::new(
         audit_log.clone(),
         upload_queue.clone(),
         uploads_dir.clone(),
         server_tx.clone(),
+    );
+
+    // Plan: herd-scout/ipc/1 ALPN — remote IPC bridge for the GUI.
+    // Constructed before the router so we can mount it on
+    // `Router::builder` next to admin / control / upload.
+    let remote_ipc_handler = remote_ipc::RemoteIpcHandler::new(
+        client_tx.clone(),
+        server_tx.clone(),
+        audit_log.clone(),
+    );
+    let remote_ipc_gate = remote_ipc::ipc_predicate(
+        control_cfg.clone(),
+        own_node_id,
+        audit_log.clone(),
     );
 
     // Mount moq + gossip via Live::register_protocols, then add our
@@ -267,6 +286,10 @@ async fn main() -> Result<()> {
         .accept(
             herd_scout_ipc::UPLOAD_ALPN,
             iroh::protocol::AccessLimit::new(upload_handler.clone(), upload_gate),
+        )
+        .accept(
+            herd_scout_ipc::REMOTE_IPC_ALPN,
+            iroh::protocol::AccessLimit::new(remote_ipc_handler, remote_ipc_gate),
         )
         .spawn();
     info!(
@@ -348,7 +371,9 @@ async fn main() -> Result<()> {
     info!(path = %socket_path.display(), "binding daemon IPC socket");
     let listener = ipc::server::bind(&socket_path)
         .with_context(|| format!("binding daemon socket at {}", socket_path.display()))?;
-    let (client_tx, mut client_rx) = mpsc::channel::<ClientMsg>(32);
+    // Note: `client_tx` and `client_rx` were hoisted up above the
+    // router builder so the remote_ipc handler can capture
+    // `client_tx` ahead of `Router::spawn`. We just clone here.
     {
         let listener = listener;
         let server_tx = server_tx.clone();

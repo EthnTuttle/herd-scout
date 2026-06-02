@@ -280,6 +280,55 @@ Wire iroh-smol-kv as the durable data plane and ship the minimal record layer th
 - **EID hand-off**: where exactly does an EID scan create the Animal? Suggest the EID crate's CLI / phone integration writes via the IPC `CreateAsset` path; no FMS-internal wiring needed in this plan beyond the docstring marker.
 - **Multi-farm support**: out of scope — one farm namespace per daemon for v1. Multi-namespace per device is a follow-up.
 
+## Remote IPC bridge — herd-scout/ipc/1 ALPN (2026-06-02, post-Phase-3)
+
+Adjacent to the FMS plan but driven by the same need: an operator
+asked how to connect the GUI to the daemon running on `bigdeal`.
+The local-only UDS surface didn't have an answer, so this lands as
+a sixth ALPN on the daemon's iroh `Router` and a `--daemon
+<NodeId>` flag (or `HERD_SCOUT_DAEMON` env) on the GUI.
+
+What shipped:
+
+- New `herd_scout_ipc::REMOTE_IPC_ALPN = b"herd-scout/ipc/1"`.
+- `herd-scout-daemon::remote_ipc::RemoteIpcHandler` accepts one
+  bi-stream per QUIC connection and embeds it into the daemon's
+  existing `from_clients_tx` / `to_clients_tx` channels — remote
+  GUIs are indistinguishable from UDS GUIs from the dispatcher's
+  perspective, so all the FMS / pairing / upload RPCs Just Work.
+- `ipc_predicate` reuses `[control_plane.admins]` for the gate
+  (same scope as the admin RPC ALPN — anyone who can drive the
+  full GUI surface can already mutate state, and a dedicated
+  `ipc_clients` set adds operational complexity without security
+  benefit). Self-dial rejected. Audit lines:
+  `remote_ipc_rejected`, `remote_ipc_session_open`,
+  `remote_ipc_session_close`.
+- GUI gained a `--daemon <NodeId>` CLI flag /
+  `HERD_SCOUT_DAEMON` env. When set, skips the local UDS and
+  auto-spawn paths and dials the daemon's `herd-scout/ipc/1`
+  ALPN over iroh. The reader/writer halves were refactored to be
+  generic over `AsyncRead`/`AsyncWrite`, so the same dispatch
+  code drives both transports.
+- GUI gained its own `identity.toml` at
+  `<config-dir>/herd-scout-gui/identity.toml` (shape identical to
+  herdctl's). The operator's existing herdctl identity can be
+  copied here to reuse a single NodeId across CLI and GUI.
+
+Operator workflow for the bigdeal use case:
+1. On bigdeal, run the daemon — note its NodeId at boot.
+2. On the laptop, `cargo run -p herd-scout-gui` once to mint the
+   GUI's identity; note the GUI's NodeId from the log line
+   `GUI: local NodeId (must be in daemon's [control_plane.admins])`.
+3. ssh into bigdeal, edit `~/.config/herd-scout/control.toml` to add
+   the GUI's NodeId under `[[control_plane.admins]]` (or use
+   `herdctl admin add-allowed`).
+4. On the laptop:
+   `cargo run -p herd-scout-gui -- --daemon <bigdeal_node_id>`.
+
+Two new tests in `remote_ipc::handler::tests` verify the predicate
+admits admins and rejects self-dial. Workspace test count: 160
+(was 158).
+
 ## Phase 5 deferral — execution-time decision (2026-06-02)
 
 The Phase 0 audit established that durable iroh-smol-kv does not

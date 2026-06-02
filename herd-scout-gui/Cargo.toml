@@ -35,6 +35,14 @@ anyhow = "1"
 # === Daemon spawn helper (for getting the user-data dir for socket paths and logs) ===
 directories = "5"
 
+# === Remote IPC mode (`--daemon <NodeId>`): dials the daemon's
+# herd-scout/ipc/1 ALPN over iroh instead of the local UDS. The
+# GUI also needs the identity envelope to load/generate the
+# operator's per-device SecretKey so the daemon's allowlist can
+# recognize it. ===
+iroh = { workspace = true }
+herd-scout-identity = { path = "../herd-scout-identity" }
+
 # === Phase 5 (desktop video upload): client-side BLAKE3 hashing of dropped clips
 # (must match the version used by herd-scout-daemon and herdctl) plus a native
 # file picker for the Cmd/Ctrl+O hotkey. ===

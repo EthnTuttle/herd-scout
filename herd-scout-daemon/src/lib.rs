@@ -21,3 +21,4 @@ pub mod control;
 pub mod ipc;
 pub mod admin;
 pub mod fms_rpc;
+pub mod remote_ipc;

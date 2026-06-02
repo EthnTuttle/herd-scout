@@ -57,6 +57,26 @@ pub const ADMIN_ALPN: &[u8] = b"herd-scout/admin/1";
 /// Versioned the same way [`CONTROL_ALPN`] / [`ADMIN_ALPN`] are.
 pub const UPLOAD_ALPN: &[u8] = b"herd-scout/upload/1";
 
+/// ALPN for the daemon's remote IPC bridge.
+///
+/// Sixth ALPN registered on the daemon's iroh `Router`. Authorized
+/// peers (entries in `[control_plane.admins]` — same allowlist as
+/// the admin RPC plane) open one bi-directional QUIC stream that
+/// speaks the *same* length-prefixed JSON [`ClientMsg`] / [`ServerMsg`]
+/// framing the local UDS does. The handler embeds (not proxies) the
+/// stream into the daemon's `from_clients_tx` / `to_clients_tx`
+/// channels so remote GUIs are indistinguishable from local UDS
+/// GUIs from the daemon's perspective.
+///
+/// Auth: NodeId allowlist via `iroh::protocol::AccessLimit`. The
+/// remote-IPC ALPN deliberately reuses `[control_plane.admins]`
+/// because anyone who can drive the GUI's full surface can already
+/// mutate records, and admin-rights is the right least-privilege
+/// scope for that.
+///
+/// Versioned the same way the others are.
+pub const REMOTE_IPC_ALPN: &[u8] = b"herd-scout/ipc/1";
+
 /// One entry in the daemon's SSH allowlist. `node_id` is a canonical
 /// `EndpointId` string; `label` is human-readable and may be empty
 /// (legacy entries that pre-date the labeled-schema migration).

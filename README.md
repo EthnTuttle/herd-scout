@@ -48,6 +48,35 @@ cargo run -p herdctl -- ping <daemon_node_id>
 
 Linux (production target) or macOS for development. Windows IPC is not implemented.
 
+### Remote GUI (laptop ↔ headless daemon)
+
+The GUI can connect to a daemon running on a different machine over
+iroh QUIC — no SSH tunnel, no port-forward, no public IP needed.
+
+```sh
+# 1. On the daemon host (e.g. bigdeal): run the daemon, note its NodeId.
+ssh bigdeal
+cargo run -p herd-scout-daemon
+#    → herd-scout-daemon ticket: ...
+#    → iroh endpoint bound: <DAEMON_NODE_ID>
+
+# 2. On the laptop: launch the GUI once so it mints its own identity,
+#    then read the GUI's NodeId from the log:
+cargo run -p herd-scout-gui --      # quit immediately, just to mint identity
+#    → GUI: local NodeId <GUI_NODE_ID> (must be in daemon's [control_plane.admins])
+
+# 3. On bigdeal: add the GUI's NodeId to the daemon's admin allowlist.
+#    Either edit ~/.config/herd-scout/control.toml, or use the admin app.
+
+# 4. On the laptop: dial the remote daemon by NodeId.
+cargo run -p herd-scout-gui -- --daemon <DAEMON_NODE_ID>
+# or:  HERD_SCOUT_DAEMON=<DAEMON_NODE_ID> cargo run -p herd-scout-gui
+```
+
+Auth: `[control_plane.admins]` — same allowlist used by the admin
+RPC ALPN. Self-dial is rejected. Sessions are audit-logged
+(`remote_ipc_session_open` / `_close`).
+
 ## Documentation
 
 - [`.wiki/_index.md`](.wiki/_index.md) — research and design articles

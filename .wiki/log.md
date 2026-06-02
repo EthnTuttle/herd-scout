@@ -160,3 +160,25 @@ daemon owns records-exchange.
 
 Workspace test count: 158 (3 new projection tests). See plan §"Phase
 3 shipped" for the full deviation note.
+
+## [2026-06-02] remote ipc bridge | herd-scout/ipc/1 ALPN — GUI ↔ remote daemon
+
+Sixth ALPN on the daemon's router. `RemoteIpcHandler` accepts one
+QUIC bi-stream per session and embeds it into the daemon's existing
+`from_clients_tx` / `to_clients_tx` channels — remote GUIs are
+indistinguishable from local UDS GUIs to the dispatcher. Auth
+reuses `[control_plane.admins]` (same scope as the admin RPC ALPN
+since GUI access ≥ admin access). Self-dial rejected. Audit lines:
+`remote_ipc_rejected`, `remote_ipc_session_open`,
+`remote_ipc_session_close`.
+
+GUI side: `--daemon <NodeId>` CLI flag (or `HERD_SCOUT_DAEMON` env)
+skips the UDS path and dials the daemon over iroh. The
+reader/writer halves are now generic over `AsyncRead`/`AsyncWrite`
+so the same dispatch code drives both transports. GUI mints its
+own identity envelope at
+`<config-dir>/herd-scout-gui/identity.toml`.
+
+Two new predicate tests; workspace test count 160 (was 158). See
+plan §"Remote IPC bridge — herd-scout/ipc/1 ALPN" for the full
+operator workflow.

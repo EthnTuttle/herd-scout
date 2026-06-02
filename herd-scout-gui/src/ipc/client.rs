@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use herd_scout_ipc::{ClassCountsWire, ClientMsg, ConnectionStatus, DetWire, ServerMsg};
 use parking_lot::RwLock;
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -112,9 +112,25 @@ pub async fn run_client(
         .await
         .with_context(|| format!("connecting to daemon socket at {}", socket_path.display()))?;
     info!(path = %socket_path.display(), "GUI: connected to daemon");
-    *state.disconnected.write() = false;
 
     let (read_half, write_half) = tokio::io::split(stream);
+    spawn_session_halves(read_half, write_half, state, repaint_cb).await
+}
+
+/// Wires up the reader/writer pair around any pair of halves and
+/// returns a connected `IpcClientHandle`. Used by both the UDS path
+/// (`run_client`) and the iroh QUIC path (`run_remote_client`).
+async fn spawn_session_halves<R, W>(
+    read_half: R,
+    write_half: W,
+    state: Arc<SharedClientState>,
+    repaint_cb: impl Fn() + Send + Sync + 'static,
+) -> Result<IpcClientHandle>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    *state.disconnected.write() = false;
     let (tx, rx) = mpsc::channel::<ClientMsg>(32);
 
     // Spawn writer.
@@ -122,7 +138,6 @@ pub async fn run_client(
         let state = state.clone();
         tokio::spawn(async move {
             run_writer(write_half, rx).await;
-            // Mark disconnected once writer exits.
             *state.disconnected.write() = true;
         });
     }
@@ -148,7 +163,54 @@ pub async fn run_client(
     Ok(IpcClientHandle { state, send: tx })
 }
 
-async fn run_writer(mut write_half: WriteHalf<UnixStream>, mut rx: mpsc::Receiver<ClientMsg>) {
+/// Connect to a remote daemon over iroh `REMOTE_IPC_ALPN`.
+///
+/// `daemon_node_id` is a parseable `iroh::EndpointId`; `secret` is
+/// the local device's iroh secret key (typically loaded via
+/// `herd_scout_identity`). The daemon must have this peer's NodeId
+/// in `[control_plane.admins]`.
+pub async fn run_remote_client(
+    daemon_node_id: iroh::EndpointId,
+    secret: iroh::SecretKey,
+    state: Arc<SharedClientState>,
+    repaint_cb: impl Fn() + Send + Sync + 'static,
+) -> Result<IpcClientHandle> {
+    use iroh::endpoint::presets;
+    use iroh::EndpointAddr;
+
+    info!(
+        daemon = %daemon_node_id.fmt_short(),
+        "GUI: dialing remote daemon over herd-scout/ipc/1",
+    );
+
+    let endpoint = iroh::Endpoint::builder(presets::N0)
+        .secret_key(secret)
+        .bind()
+        .await
+        .map_err(|e| anyhow::anyhow!("iroh endpoint bind: {e}"))?;
+
+    let conn = endpoint
+        .connect(
+            EndpointAddr::new(daemon_node_id),
+            herd_scout_ipc::REMOTE_IPC_ALPN,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("dial remote daemon: {e}"))?;
+
+    let (send, recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| anyhow::anyhow!("open bi-stream: {e}"))?;
+
+    info!(
+        daemon = %daemon_node_id.fmt_short(),
+        "GUI: connected to remote daemon",
+    );
+
+    spawn_session_halves(recv, send, state, repaint_cb).await
+}
+
+async fn run_writer<W: AsyncWrite + Unpin>(mut write_half: W, mut rx: mpsc::Receiver<ClientMsg>) {
     while let Some(msg) = rx.recv().await {
         let bytes = match serde_json::to_vec(&msg) {
             Ok(b) => b,
@@ -164,8 +226,8 @@ async fn run_writer(mut write_half: WriteHalf<UnixStream>, mut rx: mpsc::Receive
     }
 }
 
-async fn run_reader(
-    mut read_half: ReadHalf<UnixStream>,
+async fn run_reader<R: AsyncRead + Unpin>(
+    mut read_half: R,
     state: Arc<SharedClientState>,
     repaint: Arc<dyn Fn() + Send + Sync>,
 ) {
