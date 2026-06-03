@@ -664,8 +664,12 @@ async fn main() -> Result<()> {
 async fn open_fms_projection(
     fms: &herd_scout_fms::Fms,
 ) -> Option<herd_scout_fms::projection::Projection> {
+    // `audit::audit_dir()` already returns `<XDG_DATA_HOME>/herd-scout`
+    // — that *is* our data dir. The projection lives next to the
+    // FMS records (under `<data_dir>/projection.sqlite`); the FMS
+    // crate itself nests under `<data_dir>/fms/`.
     let data_dir = match audit::audit_dir() {
-        Ok(p) => p.parent().map(|p| p.to_path_buf()).unwrap_or(p),
+        Ok(p) => p,
         Err(e) => {
             warn!("fms_projection: cannot resolve data dir: {e:#}");
             return None;
@@ -688,15 +692,16 @@ async fn open_fms_projection(
 /// `$XDG_DATA_HOME/herd-scout/`). Best-effort: returns `None` and
 /// logs on failure so the daemon's IPC surface stays up.
 async fn open_fms_records() -> Option<herd_scout_fms::Fms> {
-    // The audit module's data-dir resolver gives us a stable
-    // OS-conventional path. The fms crate puts its files under a
-    // `fms/` subdir inside whatever path we hand it.
+    // `audit::audit_dir()` returns the canonical
+    // `<XDG_DATA_HOME>/herd-scout` directory — that *is* our data
+    // dir, not its parent. The FMS crate puts its files under
+    // `<data_dir>/fms/`; the projection sibling lands at
+    // `<data_dir>/projection.sqlite`. (Earlier versions stripped
+    // the `herd-scout` parent and put FMS files in
+    // `~/.local/share/fms/` next to the herd-scout/ subdir; the
+    // operator migration step is documented in the cutover plan.)
     let data_dir = match audit::audit_dir() {
-        Ok(p) => {
-            // audit_dir is `<data_dir>/herd-scout`; FMS lives next
-            // to it, not nested under it.
-            p.parent().map(|p| p.to_path_buf()).unwrap_or(p)
-        }
+        Ok(p) => p,
         Err(e) => {
             warn!("fms: cannot resolve data dir, using temp_dir: {e:#}");
             std::env::temp_dir().join("herd-scout")
